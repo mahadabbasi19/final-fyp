@@ -1,0 +1,22 @@
+# Java Refactoring Engine - Requirements
+# ======================================
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+customtkinter>=5.2.0
+javalang>=0.13.0
+
+# Standard library modules used (no install needed):
+# - tkinter (comes with Python)
+# - json
+# - os
+# - sys
+# - re
+# - hashlib
+# - datetime
+# - collections
+# - dataclasses
+# - typing
+# - difflib
+# - pathlib
+# - threading
