@@ -1,5 +1,5 @@
 // SimpleTest.java
-
+import java.util.Scanner;
 public class SimpleTest {
     
     private String name;

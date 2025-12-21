@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test files
+test_*.py
+demo_*.py
+
+# Documentation (local only)
+CODE_DOCUMENTATION_FOR_VIVA.md
+
+# IDE
+.vscode/
+.idea/
+
+# Misc
+*.log
+*.tmp

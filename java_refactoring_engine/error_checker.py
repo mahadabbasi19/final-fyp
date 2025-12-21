@@ -518,6 +518,80 @@ class JavaSyntaxChecker:
                 suggestion="Add matching ']' to close"
             ))
         
+        # Second pass: Check for type mismatches
+        errors.extend(self._check_type_mismatches(lines))
+        
+        return errors
+    
+    def _check_type_mismatches(self, lines: List[str]) -> List[JavaError]:
+        """
+        Check for common type mismatch errors.
+        Detects patterns like: int x = "hello"; (string to int)
+        """
+        errors = []
+        
+        # Numeric types that cannot hold strings
+        numeric_types = {'int', 'long', 'short', 'byte', 'float', 'double', 'boolean', 'char'}
+        
+        for i, line in enumerate(lines, 1):
+            line_stripped = line.strip()
+            
+            # Skip comments
+            if line_stripped.startswith('//') or line_stripped.startswith('*') or line_stripped.startswith('/*'):
+                continue
+            
+            # Pattern: numeric_type varName = "string";
+            # Match: int x = "hello"; or double y = "test";
+            type_mismatch = re.match(
+                r'(int|long|short|byte|float|double|boolean|char)\s+(\w+)\s*=\s*"[^"]*"',
+                line_stripped
+            )
+            if type_mismatch:
+                var_type = type_mismatch.group(1)
+                var_name = type_mismatch.group(2)
+                errors.append(JavaError(
+                    line=i,
+                    column=line_stripped.index('=') + 1,
+                    error_type=ErrorType.SYNTAX,
+                    severity=ErrorSeverity.ERROR,
+                    message=f"Type mismatch: cannot assign String to {var_type}",
+                    suggestion=f"Change type to String or assign a {var_type} value"
+                ))
+            
+            # Pattern: String varName = number; (number to String)
+            string_to_num = re.match(
+                r'String\s+(\w+)\s*=\s*(\d+)\s*;',
+                line_stripped
+            )
+            if string_to_num:
+                var_name = string_to_num.group(1)
+                num_val = string_to_num.group(2)
+                errors.append(JavaError(
+                    line=i,
+                    column=line_stripped.index('=') + 1,
+                    error_type=ErrorType.SYNTAX,
+                    severity=ErrorSeverity.ERROR,
+                    message=f"Type mismatch: cannot assign int to String",
+                    suggestion=f'Use String.valueOf({num_val}) or "{num_val}"'
+                ))
+            
+            # Pattern: boolean x = "true"; (string literal instead of boolean)
+            bool_string = re.match(
+                r'boolean\s+(\w+)\s*=\s*"(true|false)"',
+                line_stripped
+            )
+            if bool_string:
+                var_name = bool_string.group(1)
+                bool_val = bool_string.group(2)
+                errors.append(JavaError(
+                    line=i,
+                    column=line_stripped.index('=') + 1,
+                    error_type=ErrorType.SYNTAX,
+                    severity=ErrorSeverity.ERROR,
+                    message=f"Type mismatch: cannot assign String to boolean",
+                    suggestion=f"Use {bool_val} without quotes"
+                ))
+        
         return errors
 
 
@@ -924,23 +998,112 @@ class StaticAnalyzer:
         # Strip comments from code for analysis
         code_no_comments, comment_line_map = strip_java_comments(code)
         
-        # Run all analysis checks
-        self._check_unused_variables(code_no_comments, lines, comment_line_map)
-        self._check_unreachable_code(code_no_comments, lines, comment_line_map)
-        self._check_naming_conventions(code_no_comments, lines, comment_line_map)
-        self._check_empty_blocks(code_no_comments, lines, comment_line_map)
-        self._check_magic_numbers(code_no_comments, lines, comment_line_map)
-        self._check_long_methods(code, lines)
-        self._check_deep_nesting(code_no_comments, lines, comment_line_map)
-        self._check_empty_catch(code, lines)
-        self._check_system_exit(code_no_comments, lines, comment_line_map)
-        self._check_hardcoded_strings(code_no_comments, lines, comment_line_map)
+        # Run unused imports check - this is reliable
+        self._check_unused_imports(code_no_comments, lines, comment_line_map)
+        
+        # Disabled checks that cause too many false positives:
+        # self._check_unused_variables(code_no_comments, lines, comment_line_map)
+        # self._check_unreachable_code(code_no_comments, lines, comment_line_map)
+        # self._check_naming_conventions(code_no_comments, lines, comment_line_map)
+        # self._check_empty_blocks(code_no_comments, lines, comment_line_map)
+        # self._check_magic_numbers(code_no_comments, lines, comment_line_map)
+        # self._check_long_methods(code, lines)
+        # self._check_deep_nesting(code_no_comments, lines, comment_line_map)
+        # self._check_empty_catch(code, lines)
+        # self._check_system_exit(code_no_comments, lines, comment_line_map)
+        # self._check_hardcoded_strings(code_no_comments, lines, comment_line_map)
         
         return self.warnings
     
     def _is_comment_line(self, line_num: int, comment_map: Dict[int, bool]) -> bool:
         """Check if a line number is a comment line."""
         return comment_map.get(line_num, False)
+    
+    def _check_unused_imports(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
+        """
+        Check for unused import statements in Java code.
+        
+        Detects:
+        - Import statements where the imported class/package is never used
+        - Duplicate import statements
+        - Wildcard imports (as warnings for best practice)
+        """
+        imports = []  # List of (line_num, import_statement, imported_name)
+        seen_imports = set()  # For duplicate detection
+        
+        # Find all import statements
+        import_pattern = re.compile(r'^import\s+(static\s+)?([a-zA-Z_][\w.]*(?:\.\*)?)\s*;')
+        
+        for i, line in enumerate(lines, 1):
+            stripped = line.strip()
+            
+            # Skip comment lines
+            if self._is_comment_line(i, comment_map):
+                continue
+            
+            match = import_pattern.match(stripped)
+            if match:
+                is_static = match.group(1) is not None
+                full_import = match.group(2)
+                
+                # Check for duplicate imports
+                if full_import in seen_imports:
+                    self.warnings.append(JavaError(
+                        line=i,
+                        column=1,
+                        error_type=ErrorType.WARNING,
+                        severity=ErrorSeverity.WARNING,
+                        message=f"Duplicate import: '{full_import}'",
+                        suggestion="Remove the duplicate import statement"
+                    ))
+                    continue
+                
+                seen_imports.add(full_import)
+                
+                # Check for wildcard imports (best practice warning)
+                if full_import.endswith('.*'):
+                    self.warnings.append(JavaError(
+                        line=i,
+                        column=1,
+                        error_type=ErrorType.INFO,
+                        severity=ErrorSeverity.INFO,
+                        message=f"Wildcard import: '{full_import}'",
+                        suggestion="Consider using specific imports for better code clarity"
+                    ))
+                    continue  # Can't check usage for wildcard imports
+                
+                # Extract the class name (last part of import)
+                class_name = full_import.split('.')[-1]
+                imports.append((i, full_import, class_name, is_static))
+        
+        # Get code after imports for usage checking
+        code_after_imports = code
+        
+        # Check if each imported class/method is used
+        for line_num, full_import, class_name, is_static in imports:
+            # Build pattern to find usage of the imported class
+            # For static imports, check for method/field name
+            # For regular imports, check for class name usage
+            
+            # Count occurrences in code (excluding the import line itself)
+            usage_pattern = re.compile(r'\b' + re.escape(class_name) + r'\b')
+            
+            # Get code without the import statement for counting
+            code_without_import = '\n'.join(
+                line for j, line in enumerate(lines, 1) if j != line_num
+            )
+            
+            occurrences = len(usage_pattern.findall(code_without_import))
+            
+            if occurrences == 0:
+                self.warnings.append(JavaError(
+                    line=line_num,
+                    column=1,
+                    error_type=ErrorType.WARNING,
+                    severity=ErrorSeverity.WARNING,
+                    message=f"Unused import: '{full_import}'",
+                    suggestion=f"Remove the unused import statement"
+                ))
     
     def _check_unused_variables(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
         """Check for unused local variables."""
@@ -1337,18 +1500,18 @@ class ErrorChecker:
         """
         all_errors = []
         
-        # 1. Syntax errors ONLY - use javac if available, otherwise minimal regex checks
+        # 1. Syntax errors - use javac if available, otherwise minimal regex checks
         syntax_errors = self.syntax_checker.check_syntax(code)
         all_errors.extend(syntax_errors)
         
-        # DISABLED: Runtime error detection causes too many false positives
+        # 2. Runtime error detection - DISABLED (too many false positives)
         # runtime_errors = self.runtime_detector.detect_runtime_errors(code)
         # all_errors.extend(runtime_errors)
         
-        # DISABLED: Static analysis causes too many false positives
-        # if include_warnings:
-        #     static_warnings = self.static_analyzer.analyze(code)
-        #     all_errors.extend(static_warnings)
+        # 3. Static analysis (unused imports only - minimal false positives)
+        if include_warnings:
+            static_warnings = self.static_analyzer.analyze(code)
+            all_errors.extend(static_warnings)
         
         # Sort by severity and line number
         all_errors.sort(key=lambda e: (
