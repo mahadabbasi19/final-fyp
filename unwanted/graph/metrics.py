@@ -2,34 +2,10 @@
 Metrics and Visualization Module
 ================================
 Provides code quality metrics collection and visualization capabilities.
-Includes Halstead complexity, Maintainability Index, health scoring,
-charts, statistics, and comparative analysis.
-
-Mathematical Foundations:
-    Halstead Complexity Measures (1977):
-        η1 = number of unique operators
-        η2 = number of unique operands
-        N1 = total occurrences of operators
-        N2 = total occurrences of operands
-        Program Vocabulary: η = η1 + η2
-        Program Length:     N = N1 + N2
-        Volume:             V = N * log2(η)
-        Difficulty:         D = (η1 / 2) * (N2 / η2)
-        Effort:             E = D * V
-
-    Maintainability Index (SEI / Coleman, 1994):
-        MI = 171 - 5.2 * ln(V) - 0.23 * CC - 16.2 * ln(LOC) + 50 * sin(sqrt(2.4 * perCM))
-        where:
-            V     = Halstead Volume
-            CC    = Cyclomatic Complexity
-            LOC   = Lines of Code
-            perCM = percent comment lines (0.0 – 1.0)
-        MI is clamped to [0, 100].
+Includes charts, statistics, and comparative analysis.
 """
 
 import json
-import math
-import re
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
@@ -55,14 +31,6 @@ class MetricsSnapshot:
     long_methods: int
     large_classes: int
     duplicate_blocks: int
-    # Halstead complexity measures
-    halstead_volume: float = 0.0
-    halstead_effort: float = 0.0
-    halstead_difficulty: float = 0.0
-    # Maintainability Index (0–100, higher is better)
-    maintainability_index: float = 0.0
-    # Normalized health score (0–100)
-    health_score: float = 0.0
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -88,225 +56,6 @@ class RefactoringStats:
         return asdict(self)
 
 
-# ---------------------------------------------------------------------------
-#  Halstead Complexity Calculator
-# ---------------------------------------------------------------------------
-
-class HalsteadCalculator:
-    """
-    Computes Halstead complexity measures for Java source code.
-
-    Halstead's software science metrics (1977) treat a program as a sequence
-    of *operators* and *operands*.
-
-    Definitions:
-        η1 – distinct operators        n1 – total operator occurrences
-        η2 – distinct operands          n2 – total operand occurrences
-        Vocabulary  η = η1 + η2
-        Length      N = n1 + n2
-        Volume      V = N × log₂(η)          — "size" in bits
-        Difficulty  D = (η1 / 2) × (n2 / η2)  — error-proneness
-        Effort      E = D × V                  — cognitive cost
-    """
-
-    # Java operators recognised by the calculator.
-    # Ordered longest-first so the tokeniser matches '>>>' before '>>' before '>'.
-    JAVA_OPERATORS: List[str] = [
-        '>>>=', '<<=', '>>=',
-        '>>>', '<<', '>>',
-        '<=', '>=', '==', '!=', '&&', '||',
-        '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=',
-        '++', '--', '->',
-        '+', '-', '*', '/', '%',
-        '&', '|', '^', '~',
-        '!', '<', '>', '=',
-        '?', ':',
-        '.', ',', ';',
-        '(', ')', '{', '}', '[', ']',
-    ]
-
-    # Java keyword-operators (control flow, type, allocation, etc.)
-    JAVA_KEYWORD_OPERATORS = frozenset({
-        'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
-        'break', 'continue', 'return', 'throw', 'throws',
-        'try', 'catch', 'finally',
-        'new', 'instanceof', 'assert',
-        'synchronized', 'volatile',
-        'class', 'interface', 'enum', 'extends', 'implements',
-        'import', 'package',
-        'public', 'private', 'protected', 'static', 'final', 'abstract',
-        'transient', 'native', 'strictfp',
-        'void',
-    })
-
-    # Tokens treated as operands when they appear as identifiers / literals.
-    JAVA_KEYWORD_OPERANDS = frozenset({
-        'true', 'false', 'null', 'this', 'super',
-    })
-
-    # Primitive type keywords (operands in declarations).
-    JAVA_PRIMITIVE_TYPES = frozenset({
-        'int', 'long', 'short', 'byte', 'float', 'double', 'char', 'boolean',
-    })
-
-    def __init__(self) -> None:
-        self.operators: Dict[str, int] = defaultdict(int)
-        self.operands: Dict[str, int] = defaultdict(int)
-
-    # ----- public API -----
-
-    def analyze(self, code: str) -> Dict[str, Any]:
-        """
-        Analyse *code* and return a dictionary of Halstead measures.
-
-        Returns dict with keys:
-            eta1, eta2  – unique operators / operands
-            n1,   n2    – total  operators / operands
-            vocabulary, length, volume, difficulty, effort
-        """
-        self.operators.clear()
-        self.operands.clear()
-        self._tokenize(code)
-        return self._compute()
-
-    # ----- tokenisation (regex-based, not a full lexer) -----
-
-    # Pre-compiled patterns
-    _RE_BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.DOTALL)
-    _RE_LINE_COMMENT = re.compile(r'//[^\n]*')
-    _RE_STRING_LIT = re.compile(r'"(?:[^"\\]|\\.)*"')
-    _RE_CHAR_LIT = re.compile(r"'(?:[^'\\]|\\.)*'")
-    _RE_NUMBER_LIT = re.compile(
-        r'\b(?:0[xX][0-9a-fA-F_]+|0[bB][01_]+|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9_]+)?)[lLfFdD]?\b'
-    )
-    _RE_IDENTIFIER = re.compile(r'\b[A-Za-z_$][A-Za-z0-9_$]*\b')
-
-    def _tokenize(self, code: str) -> None:
-        """Walk through *code* and populate self.operators / self.operands."""
-
-        # --- Pass 1: strip comments and collect string / char / number literals ---
-        # (These are operands.)
-        stripped = self._RE_BLOCK_COMMENT.sub(' ', code)
-        stripped = self._RE_LINE_COMMENT.sub(' ', stripped)
-
-        for m in self._RE_STRING_LIT.finditer(stripped):
-            self.operands[m.group()] += 1
-        stripped = self._RE_STRING_LIT.sub(' ', stripped)
-
-        for m in self._RE_CHAR_LIT.finditer(stripped):
-            self.operands[m.group()] += 1
-        stripped = self._RE_CHAR_LIT.sub(' ', stripped)
-
-        for m in self._RE_NUMBER_LIT.finditer(stripped):
-            self.operands[m.group()] += 1
-        stripped = self._RE_NUMBER_LIT.sub(' ', stripped)
-
-        # --- Pass 2: extract symbol-operators (longest match first) ---
-        remaining = stripped
-        for op in self.JAVA_OPERATORS:
-            count = remaining.count(op)
-            if count:
-                self.operators[op] += count
-                remaining = remaining.replace(op, ' ')
-
-        # --- Pass 3: classify remaining identifiers ---
-        for m in self._RE_IDENTIFIER.finditer(stripped):
-            word = m.group()
-            if word in self.JAVA_KEYWORD_OPERATORS:
-                self.operators[word] += 1
-            elif word in self.JAVA_KEYWORD_OPERANDS or word in self.JAVA_PRIMITIVE_TYPES:
-                self.operands[word] += 1
-            else:
-                # user-defined identifier → operand
-                self.operands[word] += 1
-
-    # ----- computation -----
-
-    def _compute(self) -> Dict[str, Any]:
-        eta1 = len(self.operators)            # unique operators
-        eta2 = max(len(self.operands), 1)     # unique operands (≥1 to avoid /0)
-        n1 = sum(self.operators.values())     # total operators
-        n2 = sum(self.operands.values())      # total operands
-
-        vocabulary = eta1 + eta2
-        length = n1 + n2
-
-        # Volume = N * log2(η);  η must be ≥ 2 to avoid log2(0) or log2(1)=0
-        if vocabulary >= 2:
-            volume = length * math.log2(vocabulary)
-        else:
-            volume = 0.0
-
-        # Difficulty = (η1 / 2) * (N2 / η2)
-        difficulty = (eta1 / 2.0) * (n2 / eta2)
-
-        # Effort = D * V
-        effort = difficulty * volume
-
-        return {
-            'eta1': eta1,
-            'eta2': eta2,
-            'n1': n1,
-            'n2': n2,
-            'vocabulary': vocabulary,
-            'length': length,
-            'volume': round(volume, 2),
-            'difficulty': round(difficulty, 2),
-            'effort': round(effort, 2),
-        }
-
-
-# ---------------------------------------------------------------------------
-#  Maintainability Index Calculator
-# ---------------------------------------------------------------------------
-
-class MaintainabilityIndexCalculator:
-    """
-    Computes the Maintainability Index using the standard SEI formula
-    published by Coleman et al. (1994):
-
-        MI = 171 − 5.2 × ln(V) − 0.23 × CC − 16.2 × ln(LOC)
-             + 50 × sin(√(2.4 × perCM))
-
-    where:
-        V     = Halstead Volume
-        CC    = average Cyclomatic Complexity
-        LOC   = lines of code (non-blank, non-comment)
-        perCM = ratio of comment lines to total lines (0.0–1.0)
-
-    The result is clamped to [0, 100].
-    """
-
-    @staticmethod
-    def calculate(
-        halstead_volume: float,
-        cyclomatic_complexity: float,
-        loc: int,
-        comment_ratio: float,
-    ) -> float:
-        """
-        Return the Maintainability Index (0–100).
-
-        All inputs are guarded against degenerate values
-        (zero / negative) to avoid math-domain errors.
-        """
-        # Guard: ln(0) is undefined ⇒ floor at 1
-        safe_volume = max(halstead_volume, 1.0)
-        safe_loc = max(loc, 1)
-        safe_cm = max(min(comment_ratio, 1.0), 0.0)
-
-        mi = (
-            171.0
-            - 5.2 * math.log(safe_volume)
-            - 0.23 * cyclomatic_complexity
-            - 16.2 * math.log(safe_loc)
-            + 50.0 * math.sin(math.sqrt(2.4 * safe_cm))
-        )
-
-        # Clamp to [0, 100]
-        return round(max(0.0, min(100.0, mi)), 2)
-
-
 class MetricsCollector:
     """
     Collects and manages code quality metrics over time.
@@ -318,84 +67,36 @@ class MetricsCollector:
         self.snapshots: List[MetricsSnapshot] = []
         self.stats = RefactoringStats()
         self.file_metrics: Dict[str, List[MetricsSnapshot]] = defaultdict(list)
-        self._halstead = HalsteadCalculator()
     
     def create_snapshot(self, metrics: Dict, 
-                        file_path: Optional[str] = None,
-                        source_code: Optional[str] = None) -> MetricsSnapshot:
+                        file_path: Optional[str] = None) -> MetricsSnapshot:
         """
         Create a metrics snapshot from a metrics dictionary.
         
         Args:
             metrics: Dictionary containing metrics data
             file_path: Optional path to the source file
-            source_code: Optional raw Java source for Halstead / MI analysis
             
         Returns:
             MetricsSnapshot object
         """
-        code_lines = metrics.get('code_lines', 0)
-        comment_lines = metrics.get('comment_lines', 0)
-        total_lines = metrics.get('total_lines', 0)
-        avg_complexity = metrics.get('avg_complexity', 0.0)
-
-        # --- Halstead analysis ---
-        halstead_volume = 0.0
-        halstead_effort = 0.0
-        halstead_difficulty = 0.0
-
-        if source_code:
-            h = self._halstead.analyze(source_code)
-            halstead_volume = h['volume']
-            halstead_difficulty = h['difficulty']
-            halstead_effort = h['effort']
-
-        # --- Maintainability Index ---
-        comment_ratio = (comment_lines / total_lines) if total_lines > 0 else 0.0
-        mi = MaintainabilityIndexCalculator.calculate(
-            halstead_volume, avg_complexity, code_lines, comment_ratio,
-        )
-
-        # --- Health Score (weighted composite 0–100) ---
-        #   MI weight  40 %
-        #   Complexity weight 30 %  (lower complexity → higher sub-score)
-        #   Cohesion/Coupling weight 30 %  (approximated from metrics dict)
-        mi_component = mi * 0.40
-
-        # Complexity sub-score: CC 1→100, CC ≥ 30→0
-        complexity_sub = max(0.0, 100.0 - (avg_complexity / 30.0) * 100.0)
-        complexity_component = complexity_sub * 0.30
-
-        # Cohesion/coupling sub-score: use caller-supplied or derive a simple proxy
-        cohesion_score = metrics.get('cohesion_score', 50)
-        coupling_score = metrics.get('coupling_score', 50)
-        cc_sub = (cohesion_score + coupling_score) / 2.0
-        cc_component = cc_sub * 0.30
-
-        health_score = round(max(0.0, min(100.0, mi_component + complexity_component + cc_component)), 2)
-
         snapshot = MetricsSnapshot(
             timestamp=datetime.now().isoformat(),
             file_path=file_path,
-            total_lines=total_lines,
-            code_lines=code_lines,
-            comment_lines=comment_lines,
+            total_lines=metrics.get('total_lines', 0),
+            code_lines=metrics.get('code_lines', 0),
+            comment_lines=metrics.get('comment_lines', 0),
             blank_lines=metrics.get('blank_lines', 0),
             total_classes=metrics.get('total_classes', 0),
             total_methods=metrics.get('total_methods', 0),
             total_fields=metrics.get('total_fields', 0),
             avg_method_length=metrics.get('avg_method_length', 0.0),
             max_method_length=metrics.get('max_method_length', 0),
-            avg_complexity=avg_complexity,
+            avg_complexity=metrics.get('avg_complexity', 0.0),
             max_complexity=metrics.get('max_complexity', 0),
             long_methods=metrics.get('long_methods', 0),
             large_classes=metrics.get('large_classes', 0),
-            duplicate_blocks=metrics.get('duplicate_blocks', 0),
-            halstead_volume=halstead_volume,
-            halstead_effort=halstead_effort,
-            halstead_difficulty=halstead_difficulty,
-            maintainability_index=mi,
-            health_score=health_score,
+            duplicate_blocks=metrics.get('duplicate_blocks', 0)
         )
         
         self.snapshots.append(snapshot)
@@ -791,190 +492,6 @@ class MetricsVisualizer:
                     lines.append(f"     [TIP] {opp['recommendation']}")
         
         return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-#  Code Health Dashboard
-# ---------------------------------------------------------------------------
-
-class CodeHealthDashboard:
-    """
-    Consolidated code-health visualisation that produces a text-based
-    "scorecard" combining Halstead, MI, complexity, coupling, and cohesion.
-
-    Health categories (based on Maintainability Index):
-        MI ≥ 85  →  HEALTHY
-        65 ≤ MI < 85  →  WARNING
-        MI < 65  →  CRITICAL
-    """
-
-    CATEGORY_THRESHOLDS = {'healthy': 85, 'warning': 65}
-
-    # ----- Public API -----
-
-    @classmethod
-    def generate(
-        cls,
-        snapshot: 'MetricsSnapshot',
-        previous: Optional['MetricsSnapshot'] = None,
-        coupling: Optional[Dict[str, Any]] = None,
-        cohesion: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Produce a structured dashboard payload (JSON-friendly dict).
-
-        Args:
-            snapshot:  current MetricsSnapshot
-            previous:  previous MetricsSnapshot (for trend)
-            coupling:  coupling dict from CouplingCohesionCalculator
-            cohesion:  cohesion dict from CouplingCohesionCalculator
-
-        Returns:
-            Dashboard dict ready for JSON serialisation or text rendering.
-        """
-        mi = snapshot.maintainability_index
-        category = cls._categorize(mi)
-
-        # ----- Trend indicator -----
-        trend: Dict[str, Any] = {'available': False}
-        if previous is not None:
-            trend = {
-                'available': True,
-                'mi_delta': round(mi - previous.maintainability_index, 2),
-                'health_delta': round(snapshot.health_score - previous.health_score, 2),
-                'complexity_delta': round(snapshot.avg_complexity - previous.avg_complexity, 2),
-                'loc_delta': snapshot.code_lines - previous.code_lines,
-                'direction': (
-                    'improving' if mi > previous.maintainability_index else
-                    'declining' if mi < previous.maintainability_index else
-                    'stable'
-                ),
-            }
-
-        # ----- Assemble dashboard -----
-        dashboard: Dict[str, Any] = {
-            'category': category,
-            'health_score': snapshot.health_score,
-            'maintainability_index': mi,
-            'halstead': {
-                'volume': snapshot.halstead_volume,
-                'difficulty': snapshot.halstead_difficulty,
-                'effort': snapshot.halstead_effort,
-            },
-            'complexity': {
-                'average': snapshot.avg_complexity,
-                'max': snapshot.max_complexity,
-            },
-            'size': {
-                'total_lines': snapshot.total_lines,
-                'code_lines': snapshot.code_lines,
-                'comment_lines': snapshot.comment_lines,
-                'classes': snapshot.total_classes,
-                'methods': snapshot.total_methods,
-            },
-            'smells': {
-                'long_methods': snapshot.long_methods,
-                'large_classes': snapshot.large_classes,
-                'duplicate_blocks': snapshot.duplicate_blocks,
-            },
-            'coupling': coupling or {},
-            'cohesion': cohesion or {},
-            'trend': trend,
-        }
-        return dashboard
-
-    @classmethod
-    def render_text(
-        cls,
-        snapshot: 'MetricsSnapshot',
-        previous: Optional['MetricsSnapshot'] = None,
-        coupling: Optional[Dict[str, Any]] = None,
-        cohesion: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """
-        Return a human-readable text dashboard.
-
-        Wraps *generate()* and formats the result as a fixed-width
-        console report.
-        """
-        d = cls.generate(snapshot, previous, coupling, cohesion)
-        w = 60  # box width
-
-        cat = d['category'].upper()
-        cat_icon = {'HEALTHY': '✅', 'WARNING': '⚠️', 'CRITICAL': '🔴'}.get(cat, '❓')
-        mi = d['maintainability_index']
-        hs = d['health_score']
-
-        lines: List[str] = []
-        _hr = '─' * (w - 2)
-        lines.append('┌' + _hr + '┐')
-        lines.append('│' + ' CODE HEALTH DASHBOARD '.center(w - 2) + '│')
-        lines.append('├' + _hr + '┤')
-
-        # Category & scores
-        lines.append('│' + f'  {cat_icon} Status: {cat}'.ljust(w - 2) + '│')
-        lines.append('│' + f'  Health Score       : {hs:6.1f} / 100'.ljust(w - 2) + '│')
-        lines.append('│' + f'  Maintainability Idx: {mi:6.2f} / 100'.ljust(w - 2) + '│')
-
-        # Halstead
-        lines.append('├' + _hr + '┤')
-        lines.append('│' + '  HALSTEAD COMPLEXITY'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Volume     (V) : {d["halstead"]["volume"]:>12.2f}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Difficulty (D) : {d["halstead"]["difficulty"]:>12.2f}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Effort     (E) : {d["halstead"]["effort"]:>12.2f}'.ljust(w - 2) + '│')
-
-        # Complexity & size
-        lines.append('├' + _hr + '┤')
-        lines.append('│' + '  COMPLEXITY & SIZE'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Avg Cyclomatic : {d["complexity"]["average"]:>8.2f}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Max Cyclomatic : {d["complexity"]["max"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Code Lines     : {d["size"]["code_lines"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Comment Lines   : {d["size"]["comment_lines"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Classes         : {d["size"]["classes"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Methods         : {d["size"]["methods"]:>8d}'.ljust(w - 2) + '│')
-
-        # Code smells
-        smells = d['smells']
-        total_smells = smells['long_methods'] + smells['large_classes'] + smells['duplicate_blocks']
-        lines.append('├' + _hr + '┤')
-        lines.append('│' + f'  CODE SMELLS ({total_smells} total)'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Long Methods    : {smells["long_methods"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Large Classes   : {smells["large_classes"]:>8d}'.ljust(w - 2) + '│')
-        lines.append('│' + f'    Duplicate Blocks: {smells["duplicate_blocks"]:>8d}'.ljust(w - 2) + '│')
-
-        # Coupling / Cohesion (if provided)
-        if d.get('coupling'):
-            c = d['coupling']
-            lines.append('├' + _hr + '┤')
-            lines.append('│' + '  COUPLING / COHESION'.ljust(w - 2) + '│')
-            lines.append('│' + f'    Coupling Score : {c.get("coupling_score", "N/A")}  ({c.get("coupling_level", "")})'.ljust(w - 2) + '│')
-        if d.get('cohesion'):
-            co = d['cohesion']
-            lines.append('│' + f'    Cohesion Score : {co.get("cohesion_score", "N/A")}  ({co.get("cohesion_level", "")})'.ljust(w - 2) + '│')
-
-        # Trend
-        t = d['trend']
-        if t['available']:
-            arrow = {'improving': '📈', 'declining': '📉', 'stable': '➡️'}.get(t['direction'], '')
-            lines.append('├' + _hr + '┤')
-            lines.append('│' + f'  TREND  {arrow}  {t["direction"].upper()}'.ljust(w - 2) + '│')
-            lines.append('│' + f'    MI change      : {t["mi_delta"]:+.2f}'.ljust(w - 2) + '│')
-            lines.append('│' + f'    Health change   : {t["health_delta"]:+.2f}'.ljust(w - 2) + '│')
-            lines.append('│' + f'    Complexity Δ    : {t["complexity_delta"]:+.2f}'.ljust(w - 2) + '│')
-            lines.append('│' + f'    LOC Δ           : {t["loc_delta"]:+d}'.ljust(w - 2) + '│')
-
-        lines.append('└' + _hr + '┘')
-        return '\n'.join(lines)
-
-    # ----- Helpers -----
-
-    @classmethod
-    def _categorize(cls, mi: float) -> str:
-        if mi >= cls.CATEGORY_THRESHOLDS['healthy']:
-            return 'HEALTHY'
-        if mi >= cls.CATEGORY_THRESHOLDS['warning']:
-            return 'WARNING'
-        return 'CRITICAL'
 
 
 class CouplingCohesionCalculator:

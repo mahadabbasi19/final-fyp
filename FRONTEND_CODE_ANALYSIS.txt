@@ -1,0 +1,2170 @@
+================================================================================
+                    CODENOVA IDE - FRONTEND CODE ANALYSIS
+              Line-by-Line Breakdown of Electron Desktop Application
+================================================================================
+
+PROJECT: Bachelor Final Year Project (FYP) - CodeNova AI IDE
+MODULE: Frontend / Desktop Application (Electron.js + Monaco Editor)
+SUBJECT: VS Code-style Desktop Editor with Real-time Refactoring
+AUTHOR: Frontend Architecture Team
+DATE: April 2026
+
+================================================================================
+                        ARCHITECTURE OVERVIEW
+================================================================================
+
+The CodeNova IDE frontend is a sophisticated Electron-based desktop application
+that provides a VS Code-like interface for Java code refactoring. It consists of:
+
+1. Main Process (Electron): Manages windows, file system, terminal, backend
+2. Preload Script: Secure IPC bridge between render process and main process
+3. Renderer Process: Monaco Editor, UI panels, real-time analysis
+4. HTML/CSS: Workbench layout, styled tabs, activity bar, sidebar panels
+5. Integration: FastAPI backend via IPC → HTTP proxy
+
+Key Technologies:
+- Electron.js (Desktop framework, 30 MB app)
+- Monaco Editor (VS Code's editor, 70K lines omitted)
+- xterm.js (Terminal emulation, 60K lines)
+- Node-pty (Terminal spawning via C++ bindings)
+- Electron-builder (Windows NSIS installer)
+- Python FastAPI backend (packaged as subprocess)
+
+================================================================================
+                        FILE 1: main.js
+================================================================================
+
+Location: desktop-app/main.js
+Purpose: Electron Main Process - manages window lifecycle, IPC handlers, backend
+         startup, terminal creation, file dialogs, and bridge to Python backend
+
+Size: ~900 lines
+Critical Role: CORE APPLICATION PROCESS (everything depends on this)
+
+---
+
+SECTION 1: IMPORTS & INITIALIZATION (Lines 1-30)
+
+[CRITICAL LINE: Line 6]
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell } = require('electron');
+- IMPORTS THE CORE ELECTRON MODULES
+- app: lifecycle events (ready, quit, etc.)
+- BrowserWindow: creates application windows
+- Menu: builds top menu bar (File, Edit, View, etc.)
+- ipcMain: CRITICAL FOR IPC (receives ipcRenderer.invoke/send from renderer)
+- dialog: shows file open/save dialogs
+- shell: opens external URLs in browser
+
+[CRITICAL LINE: Line 9]
+const { spawn } = require('child_process');
+- SPAWNS SUBPROCESSES (used to start Python backend and run file commands)
+- spawn() creates new process with streaming I/O
+
+[CRITICAL LINE: Line 12]
+app.disableHardwareAcceleration();
+- DISABLES GPU ACCELERATION (Electron performance optimization)
+- Some systems have GPU driver issues → CPU rendering is safer
+- Reduces rendering overhead for simple text editing
+
+[CRITICAL LINE: Line 16-17]
+let backendProcess = null;
+const BACKEND_PORT = 8000;
+const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+- Global state: which Python process is running
+- Port 8000: hardcoded FastAPI port
+- localhost: backend only accessible from this machine
+
+---
+
+SECTION 2: NODE-PTY Try-Catch (Lines 19-23)
+
+[CRITICAL LINE: Line 21]
+pty = require('node-pty');
+- TRY TO LOAD node-pty (C++ native module)
+- If missing → Terminal disabled (warning, don't crash)
+- **Why try-catch?** node-pty requires native compilation with node-gyp
+  - VS 2019/2022 may not be installed
+  - Python 2.7 may not be available
+  - Graceful degradation: terminal still works via subprocess fallback
+
+---
+
+SECTION 3: JAVA AUTO-DETECTION (Lines 26-65)
+
+[CRITICAL LINE: Line 29-36]
+function findJavaHome() {
+  if (process.env.JAVA_HOME && fs.existsSync(path.join(process.env.JAVA_HOME, 'bin', 'javac.exe'))) {
+    return process.env.JAVA_HOME;
+  }
+- SMART JAVA DETECTION LOGIC
+- Step 1: Check JAVA_HOME environment variable first (user's system setup)
+- Verify javac.exe exists (proof that it's real JDK, not JRE)
+- **Why check JAVA_HOME first?** User may have multiple Java versions
+
+[CRITICAL LINE: Line 38-43]
+const searchDirs = [
+  'C:\\Program Files\\Microsoft',
+  'C:\\Program Files\\Java',
+  'C:\\Program Files\\Eclipse Adoptium',
+  'C:\\Program Files\\Zulu',
+  'C:\\Program Files\\Amazon Corretto',
+];
+- FALLBACK: Common Windows Java installation locations
+- Covers multiple distributions: Oracle JDK, AdoptOpenJDK, Corretto (AWS), Zulu
+
+[CRITICAL LINE: Line 47]
+const entries = fs.readdirSync(dir).sort().reverse(); // newest first
+- LIST ALL SUBDIRECTORIES and sort in REVERSE order
+- newest first: if C:\Program Files\Java has jdk1.8 and jdk17, picks jdk17
+- **Why newest?** Most users want latest Java version
+
+[CRITICAL LINE: Line 50-51]
+if (fs.existsSync(path.join(jHome, 'bin', 'javac.exe')) || fs.existsSync(path.join(jHome, 'bin', 'javac'))) {
+  return jHome;
+}
+- VERIFICATION STEP: javac file must exist in bin/ subdirectory
+- Cross-platform check: javac.exe (Windows) or javac (Unix)
+- **Why not just check if directory exists?** Many Java installations are broken/incomplete
+
+[CRITICAL LINE: Line 59-64]
+if (JAVA_HOME) {
+  const javaBin = path.join(JAVA_HOME, 'bin');
+  if (!process.env.PATH.includes(javaBin)) {
+    process.env.PATH = javaBin + ';' + process.env.PATH;
+  }
+}
+- RESULT: Add detected Java to PATH environment variable
+- **Global modification:** All spawned subprocesses now see javac in PATH
+- **Why?** User runs "javac MyFile.java" in terminal → works without full path
+- Semicolon separator for Windows; Unix uses colon
+
+---
+
+SECTION 4: BACKEND PROCESS MANAGEMENT (Lines 68-120)
+
+[CRITICAL LINE: Line 70-76]
+function getBackendDir() {
+  const devPath = path.join(__dirname, '..', 'java_refactoring_engine');
+  if (fs.existsSync(devPath)) return devPath;
+  return path.join(process.resourcesPath, 'java_refactoring_engine');
+}
+- TWO BACKEND LOCATIONS:
+  1. devPath: During development, backend is sibling folder
+     __dirname = c:\project\desktop-app
+     .. = c:\project
+     java_refactoring_engine = c:\project\java_refactoring_engine
+  2. process.resourcesPath: After packaging with electron-builder
+     Backend bundled as resources/java_refactoring_engine/
+
+[CRITICAL LINE: Line 79]
+function killPortProcess(port) {
+- ENSURE PORT 8000 IS FREE before starting backend
+- Prevents "Address already in use" error
+- **Why needed?** If app crashed, old process may still listening on port
+
+[CRITICAL LINE: Line 80-81]
+if (process.platform === 'win32') {
+  const find = spawn('cmd', ['/c', `for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port}...'
+}
+- WINDOWS-SPECIFIC COMMAND to kill process
+- netstat -ano: list all network connections with PIDs
+- findstr :8000: filter only port 8000
+- taskkill /PID: terminate that process
+- /f: force kill (don't ask)
+
+[CRITICAL LINE: Line 95-105]
+function startBackend() {
+  return new Promise(async (resolve) => {
+    await killPortProcess(BACKEND_PORT);
+    const backendDir = getBackendDir();
+    const mainPy = path.join(backendDir, 'main.py');
+    
+    if (!fs.existsSync(mainPy)) {
+      resolve(false);
+      return;
+    }
+}
+- BACKEND STARTUP SEQUENCE
+- First kill any existing process on port 8000
+- Locate backend directory (dev vs production)
+- Verify main.py exists (fail fast if misconfigured)
+
+[CRITICAL LINE: Line 112-122]
+backendProcess = spawn(pythonCmd, [
+  '-m', 'uvicorn', 'main:app',
+  '--host', '127.0.0.1',
+  '--port', String(BACKEND_PORT),
+  '--log-level', 'info'
+], {
+  cwd: backendDir,
+  env: { ...process.env, PYTHONUNBUFFERED: '1' },
+  stdio: ['pipe', 'pipe', 'pipe']
+});
+- **THE CRITICAL SPAWN LINE** - launches Python backend
+- spawn('python', args, options)
+  - pythonCmd: 'python' on Windows, 'python3' on Unix
+  - -m uvicorn: run uvicorn module (ASGI server)
+  - main:app: load main.py and get FastAPI app object
+  - --host 127.0.0.1: only localhost (not exposed to network)
+  - --port 8000: listen on our designated port
+- cwd: run from backend directory (so imports work)
+- PYTHONUNBUFFERED=1: flush stdout immediately (see logs without delay)
+- stdio: ['pipe', 'pipe', 'pipe'] = [stdin, stdout, stderr] → capture all
+
+[CRITICAL LINE: Line 130-136]
+backendProcess.stdout.on('data', (data) => {
+  const msg = data.toString();
+  console.log('[Backend]', msg.trim());
+  if (!started && msg.includes('Uvicorn running')) {
+    started = true;
+    resolve(true);
+  }
+});
+- **CRITICAL DETECTION LOGIC**: When does backend finish starting?
+- Listen to stdout from Python process
+- Look for "Uvicorn running" message (proves server ready)
+- First time we see it, resolve Promise with true
+- **Why not resolve immediately after spawn?** Needs time to start FastAPI app, load modules
+
+[CRITICAL LINE: Line 150-155]
+setTimeout(() => {
+  if (!started) {
+    console.warn('Backend startup timed out');
+    resolve(false);
+  }
+}, 15000);
+- SAFETY VALVE: if backend doesn't start in 15 seconds, give up
+- Prevents hanging app startup forever
+- User sees "Backend offline" after 15s
+
+---
+
+SECTION 5: WINDOW CREATION (Lines 163-182)
+
+[CRITICAL LINE: Line 165-168]
+mainWindow = new BrowserWindow({
+  width: 1400,
+  height: 900,
+  minWidth: 800,
+  minHeight: 600,
+  title: 'CodeNova IDE',
+  backgroundColor: '#1e1e1e',
+  frame: true,
+  webPreferences: {
+    preload: path.join(__dirname, 'preload.js'),
+    nodeIntegration: false,
+    contextIsolation: true,
+    sandbox: false
+  },
+  icon: path.join(__dirname, 'assets', 'icon.png')
+});
+- CREATES APPLICATION WINDOW
+- 1400x900: default size
+- minWidth/minHeight: prevent resizing below usable size
+- **CRITICAL SECURITY SETTINGS**:
+  - nodeIntegration: false = renderer process can't require('fs') directly
+    (prevents XSS attacks from accessing filesystem)
+  - contextIsolation: true = renderer and main process in separate JS contexts
+    (only IPC bridge available)
+  - sandbox: false = EXCEPTION for preload script
+    (preload runs in main context so it can call ipcMain)
+- preload: BRIDGE SCRIPT (explains later)
+- icon: window title bar icon
+
+[CRITICAL LINE: Line 177]
+mainWindow.loadFile('index.html');
+- LOADS HTML FILE into window (app UI enters renderer process)
+- **What happens next?** Browser loads CSS, Monaco JS, renderer.js
+
+[CRITICAL LINE: Line 179-181]
+if (process.argv.includes('--dev')) {
+  mainWindow.webContents.openDevTools();
+}
+- DEV MODE: If started with `npm run dev`, opens Chrome DevTools
+- Allows inspection of DOM, console logs, network, debugging
+
+---
+
+SECTION 6: APPLICATION MENU (Lines 185-240)
+
+[CRITICAL LINE: Line 185-190]
+function buildAppMenu() {
+  const template = [
+    {
+      label: 'File',
+      submenu: [
+        { label: 'New File', accelerator: 'CmdOrCtrl+N', click: () => mainWindow?.webContents.send('menu:newFile') },
+}
+- **BUILDS VS CODE-STYLE MENU** (top menu bar)
+- Each menu item has:
+  - label: displayed text
+  - accelerator: keyboard shortcut (CmdOrCtrl = Cmd on macOS, Ctrl on Windows)
+  - click: callback when user clicks menu item
+- **IPC PATTERN**: click sends message to renderer process via webContents.send()
+
+Example flow:
+  User clicks File → New File
+  → mainWindow.webContents.send('menu:newFile')
+  → Renderer receives IPC message
+  → Calls createTab() to make new untitled tab
+  → UI updates to show new empty file
+
+[CRITICAL LINE: Line 200]
+{ label: 'Auto Save', type: 'checkbox', checked: false, click: (mi) => mainWindow?.webContents.send('menu:autoSave', mi.checked) }
+- CHECKBOX MENU ITEM (toggleable state)
+- mi.checked: boolean indicating current checkbox state
+- Sends state to renderer so it knows autosave is on/off
+
+---
+
+SECTION 7: FILE SYSTEM IPC HANDLERS (Lines 250-340)
+
+[CRITICAL LINE: Line 250-255]
+ipcMain.handle('dialog:openFolder', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
+  if (!result.canceled && result.filePaths.length > 0) {
+    return { canceled: false, path: result.filePaths[0] };
+  }
+  return { canceled: true };
+});
+- **IPC HANDLER #1**: Opens folder dialog
+- ipcMain.handle('dialog:openFolder', handler)
+  - When renderer calls await api.openFolder()
+  - This handler receives the IPC call and responds
+- dialog.showOpenDialog(window, options)
+  - Electron's native folder picker (native OS GUI)
+  - SECURITY: confined to single folder, can't browse system
+- Properties: ['openDirectory'] = pick folder (not file)
+- Returns: {canceled: true/false, path: '/path/to/folder'}
+
+[CRITICAL LINE: Line 258-270]
+ipcMain.handle('dialog:openFile', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'All Files', extensions: ['*'] },
+      { name: 'JavaScript', extensions: ['js', 'jsx', 'ts', 'tsx'] },
+      { name: 'Python', extensions: ['py'] },
+      { name: 'Java', extensions: ['java'] },
+      { name: 'Web', extensions: ['html', 'css', 'json'] }
+    ]
+  });
+  if (!result.canceled && result.filePaths.length > 0) {
+    const content = await fsPromises.readFile(result.filePaths[0], 'utf-8');
+    return { canceled: false, path: result.filePaths[0], content };
+  }
+})
+- **IPC HANDLER #2**: Opens file dialog (different from folder!)
+- filters: dropdown menu showing "All Files", "JavaScript", "Python", etc.
+- **IMPORTANT**: After user selects file, main.js reads file content
+- Returns {path, content} so renderer doesn't need separate read
+- **Why?** Secure: renderer can't call fs.readFile directly
+
+[CRITICAL LINE: Line 288-295]
+ipcMain.handle('fs:readDir', async (event, dirPath) => {
+  const entries = await fsPromises.readdir(dirPath, { withFileTypes: true });
+  return entries
+    .filter(e => !e.name.startsWith('.'))     // Hide dotfiles
+    .map(entry => ({
+      name: entry.name,
+      path: path.join(dirPath, entry.name),
+      isDirectory: entry.isDirectory(),
+      isFile: entry.isFile()
+    }))
+    .sort((a, b) => {
+      if (a.isDirectory && !b.isDirectory) return -1;  // Folders first
+      if (!a.isDirectory && b.isDirectory) return 1;
+      return a.name.localeCompare(b.name);              // Then alphabetical
+    });
+});
+- **IPC HANDLER #3**: List directory contents (for file tree)
+- withFileTypes: true = returns Dirent objects with isDirectory() method
+- filter: skip dotfiles (.gitignore, .vscode, etc.)
+- **SORTING PRIORITY**:
+  1. Directories before files
+  2. Within category, alphabetical order
+- Returns array of {name, path, isDirectory, isFile}
+
+[CRITICAL LINE: Line 310-312]
+ipcMain.handle('fs:writeFile', async (event, filePath, content) => {
+  await fsPromises.writeFile(filePath, content, 'utf-8');
+  return true;
+});
+- **IPC HANDLER #4**: Write file to disk
+- Called by renderer when user saves file
+- utf-8 encoding: supports all languages/special chars
+
+[CRITICAL LINE: Line 314-320]
+ipcMain.handle('fs:createFile', async (event, filePath) => {
+  try {
+    await fsPromises.access(filePath);  // Check if file exists
+    throw new Error(`File already exists: ${path.basename(filePath)}`);
+  } catch (e) {
+    if (e.message.startsWith('File already exists')) throw e;
+  }
+  await fsPromises.writeFile(filePath, '', 'utf-8');
+  return true;
+});
+- **IPC HANDLER #5**: Create new empty file
+- GUARD CLAUSE: if file exists, throw error (don't overwrite)
+- fsPromises.access() throws if file doesn't exist (confusing but true)
+- Creates empty file with writeFile(path, '')
+
+---
+
+SECTION 8: TERMINAL IPC HANDLERS (Lines 343-371)
+
+[CRITICAL LINE: Line 343-355]
+ipcMain.handle('terminal:create', (event, { cols, rows, cwd }) => {
+  if (!pty) throw new Error('node-pty is not available.');
+  const shellPath = getDefaultShell();
+  const id = nextTerminalId++;
+  const term = pty.spawn(shellPath, getShellArgs(shellPath), {
+    name: 'xterm-256color',
+    cols: cols || 80,
+    rows: rows || 24,
+    cwd: cwd || os.homedir(),
+    env: process.env
+  });
+  term.onData((data) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:data', { id, data });
+  });
+  term.onExit(({ exitCode }) => {
+    terminals.delete(id);
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('terminal:exit', { id, exitCode });
+  });
+  terminals.set(id, term);
+  return id;
+});
+- **CRITICAL TERMINAL CREATION LOGIC**
+- pty.spawn(): creates pseudo-terminal (PTY)
+  - Like opening a shell in terminal where commands run
+- arguments:
+  - shellPath: /bin/bash on Unix, cmd.exe on Windows
+  - getShellArgs(shellPath): --login on bash (initialize profile)
+  - cols/rows: terminal width/height
+  - cwd: current working directory (workspace folder)
+  - env: inherit parent process environment (PATH, HOME, etc.)
+- term.onData(): when shell outputs text
+  - Send it back to renderer via IPC 'terminal:data'
+- term.onExit(): when shell exits (user types exit or closes)
+  - Send 'terminal:exit' with exit code
+- **KEY STATE**: terminals.set(id, term)
+  - Store this PTY in global Map so we can refer to it later
+  - nextTerminalId++: each terminal gets unique ID
+
+[CRITICAL LINE: Line 358-366]
+ipcMain.on('terminal:write', (event, { id, data }) => {
+  const term = terminals.get(id);
+  if (term) term.write(data);
+});
+
+ipcMain.on('terminal:resize', (event, { id, cols, rows }) => {
+  const term = terminals.get(id);
+  if (term) { try { term.resize(cols, rows); } catch (_) {} }
+});
+
+ipcMain.on('terminal:kill', (event, { id }) => {
+  const term = terminals.get(id);
+  if (term) { term.kill(); terminals.delete(id); }
+});
+- **TERMINAL CONTROL HANDLERS**
+- on() = one-way message (no response needed)
+- vs handle() = request/response
+- Retrieves terminal by ID from Map and controls it
+- write(): send keystrokes/commands to shell
+- resize(): user resizes terminal window → adjust PTY dimensions
+- kill(): user closes terminal tab → terminate process
+
+---
+
+SECTION 9: FILE RUN HANDLER (Lines 374-397)
+
+[CRITICAL LINE: Line 374-397]
+ipcMain.handle('run:file', async (event, { filePath, cwd }) => {
+  const ext = path.extname(filePath).toLowerCase();
+  const commands = {
+    '.py': `python "${filePath}"`,
+    '.js': `node "${filePath}"`,
+    '.ts': `npx ts-node "${filePath}"`,
+    '.rb': `ruby "${filePath}"`,
+    '.go': `go run "${filePath}"`,
+    '.sh': `bash "${filePath}"`,
+    '.ps1': `powershell -File "${filePath}"`,
+  };
+  if (ext === '.java') {
+    const cn = path.basename(filePath, '.java');
+    const dir = path.dirname(filePath);
+    if (JAVA_HOME) {
+      const javacPath = path.join(JAVA_HOME, 'bin', 'javac');
+      const javaPath = path.join(JAVA_HOME, 'bin', 'java');
+      return { command: `cd "${dir}"; & "${javacPath}" "${path.basename(filePath)}"; if ($?) { & "${javaPath}" ${cn} }` };
+    }
+    return { command: `cd "${dir}"; javac "${path.basename(filePath)}"; if ($?) { java ${cn} }` };
+  }
+  if (ext === '.cpp' || ext === '.cc') return { command: `g++ "${filePath}" -o "${filePath}.exe"; if ($?) { & "${filePath}.exe" }` };
+  if (ext === '.c') return { command: `gcc "${filePath}" -o "${filePath}.exe"; if ($?) { & "${filePath}.exe" }` };
+  if (commands[ext]) return { command: commands[ext] };
+  throw new Error(`No run configuration for: ${ext}`);
+});
+- **CRITICAL**: Compiles and runs file (F5 key)
+- Detects language by file extension
+- Returns shell command string to execute
+- **JAVA SPECIAL CASE** (Lines 386-394):
+  - Extract class name from filename: MyFile.java → MyFile
+  - Get directory containing Java file
+  - If JAVA_HOME detected: use full path to javac/java
+  - Command: cd to dir → javac to compile → if compiled ok, java to run
+  - PowerShell syntax: & "${path}" executes string as path
+  - if ($?) checks if previous command succeeded
+- **OTHER LANGUAGES**:
+  - Python: python "path"
+  - JavaScript: node "path"
+  - Go: go run "path"
+  - C: gcc to compile, then run .exe
+  - C++: g++ to compile, then run .exe
+- Unknown extension → error
+
+---
+
+SECTION 10: BACKEND API PROXY (Lines 579-620)
+
+[CRITICAL LINE: Line 579-600]
+async function backendFetch(endpoint, method, body) {
+  const http = require('http');
+  return new Promise((resolve, reject) => {
+    const postData = body ? JSON.stringify(body) : null;
+    const options = {
+      hostname: '127.0.0.1',
+      port: BACKEND_PORT,
+      path: endpoint,
+      method: method,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {})
+      },
+      timeout: 30000
+    };
+    const req = http.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(data); }
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Backend request timed out')); });
+    if (postData) req.write(postData);
+    req.end();
+  });
+}
+- **THE CRITICAL HTTP BRIDGE** (IPC → REST API)
+- Why this exists: Renderer can't make HTTP requests (sandboxed)
+- Instead, renderer sends IPC → main.js → main.js makes HTTP
+- Builds HTTP request:
+  - hostname: 127.0.0.1 (localhost)
+  - port: 8000 (our FastAPI backend)
+  - path: /refactor, /check-errors, /git/commit, etc.
+  - method: GET or POST
+  - headers: Content-Type: application/json
+- Promise-based: async/await compatible
+- Error handling:
+  - Network error → reject promise
+  - Timeout 30s → destroy connection, reject
+  - Response → parse JSON (or raw string if not JSON)
+
+[CRITICAL LINE: Line 603-605]
+ipcMain.handle('backend:refactor', async (event, { java_code, apply_all, selected_refactorings }) => {
+  return await backendFetch('/refactor', 'POST', { java_code, apply_all, selected_refactorings });
+});
+- **EXAMPLE HANDLER**: When renderer calls api.backendRefactor({code: '...'})
+- Forwards to backendFetch() which calls FastAPI /refactor endpoint
+- Result returned to renderer
+
+Similar handlers for:
+- backend:checkErrors → /check-errors
+- backend:analyze → /analyze
+- backend:dependencyGraph → /dependency-graph
+- backend:chat → /chat
+- backend:gitStatus, gitCommit, gitPush, etc. → /git/* endpoints
+
+All follow same pattern: IPC receive → HTTP fetch → send result back
+
+================================================================================
+                        FILE 2: preload.js
+================================================================================
+
+Location: desktop-app/preload.js
+Purpose: Secure IPC bridge - exposes safe API to renderer process
+         Implements context isolation (main and renderer can't access each other)
+
+Size: ~170 lines
+Critical Role: SECURITY BOUNDARY (only interface between render and main)
+
+---
+
+SECTION 1: CONTEXT BRIDGE SETUP (Lines 1-10)
+
+[CRITICAL LINE: Line 3-4]
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('electronAPI', {
+- **KEY SECURITY CONCEPT**: contextBridge
+- In normal Electron: renderer can call require('fs') → major security risk
+- contextBridge: creates isolated object that bridges two contexts
+- exposeInMainWorld('electronAPI', {...}): window.electronAPI available in renderer
+- What's inside {} is the ENTIRE PUBLIC API for renderer
+- Renderer can ONLY access properties inside this object
+- Example: window.fs.readFile would NOT work (fs not exposed)
+
+[CRITICAL LINE: Line 7-15]
+// --- Dialogs ---
+openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
+openFile: () => ipcRenderer.invoke('dialog:openFile'),
+saveAs: (opts) => ipcRenderer.invoke('dialog:saveAs', opts),
+
+// --- File System ---
+readDir: (dirPath) => ipcRenderer.invoke('fs:readDir', dirPath),
+readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),
+writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', filePath, content),
+- **EXPOSE METHODS**: Each property is an async function
+- openFolder(): renderer calls await api.openFolder()
+  → ipcRenderer.invoke('dialog:openFolder')
+  → main.js receives message
+  → main.js calls dialog.showOpenDialog()
+  → result returned
+- Parameters wrapped automatically
+
+[CRITICAL LINE: Line 34-40]
+// --- Terminal ---
+createTerminal: (opts) => ipcRenderer.invoke('terminal:create', opts),
+writeTerminal: (id, data) => ipcRenderer.send('terminal:write', { id, data }),
+resizeTerminal: (id, cols, rows) => ipcRenderer.send('terminal:resize', { id, cols, rows }),
+killTerminal: (id) => ipcRenderer.send('terminal:kill', { id }),
+onTerminalData: (callback) => {
+  const handler = (event, payload) => callback(payload);
+  ipcRenderer.on('terminal:data', handler);
+  return () => ipcRenderer.removeListener('terminal:data', handler);
+},
+- **TWO IPC PATTERNS**:
+  1. invoke() = ask for response
+     - createTerminal() waits for status
+  2. send() = fire-and-forget
+     - writeTerminal() doesn't need response (shell echoes anyway)
+- **LISTENER REGISTRATION**:
+  - onTerminalData(callback): when shell outputs data, callback fires
+  - Returns cleanup function: () => ipcRenderer.removeListener()
+  - Used for: term.onData() → send IPC → callback in renderer
+
+[CRITICAL LINE: Line 51-75]
+// --- Backend (Java Refactoring Engine) ---
+backendHealth: () => ipcRenderer.invoke('backend:health'),
+backendRefactor: (opts) => ipcRenderer.invoke('backend:refactor', opts),
+backendAnalyze: (opts) => ipcRenderer.invoke('backend:analyze', opts),
+backendCheckErrors: (opts) => ipcRenderer.invoke('backend:checkErrors', opts),
+backendStats: () => ipcRenderer.invoke('backend:stats'),
+backendDependencyGraph: (opts) => ipcRenderer.invoke('backend:dependencyGraph', opts),
+backendRefactorReview: (opts) => ipcRenderer.invoke('backend:refactorReview', opts),
+backendRefactorDecision: (opts) => ipcRenderer.invoke('backend:refactorDecision', opts),
+backendChat: (opts) => ipcRenderer.invoke('backend:chat', opts),
+backendChatHealthDashboard: (opts) => ipcRenderer.invoke('backend:chatHealthDashboard', opts),
+- **REFACTORING API EXPOSURE**
+- All these call backendFetch() in main.js which proxies to FastAPI backend
+- Pattern: renderer → IPC → main.js HTTP → FastAPI → response
+
+[CRITICAL LINE: Line 77-103]
+// --- Git Operations ---
+gitStatus: (opts) => ipcRenderer.invoke('backend:gitStatus', opts),
+gitInit: (opts) => ipcRenderer.invoke('backend:gitInit', opts),
+gitStage: (opts) => ipcRenderer.invoke('backend:gitStage', opts),
+gitStageAll: (opts) => ipcRenderer.invoke('backend:gitStageAll', opts),
+gitUnstage: (opts) => ipcRenderer.invoke('backend:gitUnstage', opts),
+gitDiscard: (opts) => ipcRenderer.invoke('backend:gitDiscard', opts),
+gitCommit: (opts) => ipcRenderer.invoke('backend:gitCommit', opts),
+gitBranches: (opts) => ipcRenderer.invoke('backend:gitBranches', opts),
+gitBranchCreate: (opts) => ipcRenderer.invoke('backend:gitBranchCreate', opts),
+gitBranchSwitch: (opts) => ipcRenderer.invoke('backend:gitBranchSwitch', opts),
+gitBranchDelete: (opts) => ipcRenderer.invoke('backend:gitBranchDelete', opts),
+gitPush: (opts) => ipcRenderer.invoke('backend:gitPush', opts),
+gitPull: (opts) => ipcRenderer.invoke('backend:gitPull', opts),
+gitFetch: (opts) => ipcRenderer.invoke('backend:gitFetch', opts),
+gitDiff: (opts) => ipcRenderer.invoke('backend:gitDiff', opts),
+gitLog: (opts) => ipcRenderer.invoke('backend:gitLog', opts),
+gitStashSave: (opts) => ipcRenderer.invoke('backend:gitStashSave', opts),
+gitStashPop: (opts) => ipcRenderer.invoke('backend:gitStashPop', opts),
+gitStashList: (opts) => ipcRenderer.invoke('backend:gitStashList', opts),
+onBackendStatus: (callback) => {
+  const handler = (event, payload) => callback(payload);
+  ipcRenderer.on('backend:status', handler);
+  return () => ipcRenderer.removeListener('backend:status', handler);
+},
+- **GIT API**: All Git operations proxied through FastAPI backend
+- Backend implements /git/* endpoints using GitPython library
+- 20+ operations available from renderer
+
+[CRITICAL LINE: Line 110]
+pushToGitHub: (opts) => ipcRenderer.invoke('push-to-github', opts),
+- **SPECIAL CASE**: GitHub push via separate Python subprocess (not FastAPI)
+- main.js spawn()s github_push.py with project path, repo URL, commit message
+
+[CRITICAL LINE: Line 112-115]
+// --- Multi-file Dependency Graph ---
+multiFileDependencyGraph: (opts) => ipcRenderer.invoke('backend:multiFileDependencyGraph', opts),
+readJavaFiles: (rootPath) => ipcRenderer.invoke('fs:readJavaFiles', rootPath),
+- Special parsing for multiple Java files (detects class dependencies)
+
+[CRITICAL LINE: Line 117-121]
+// --- Refactoring History ---
+getRefactoringHistory: () => ipcRenderer.invoke('backend:getRefactoringHistory'),
+saveRefactoringHistory: (entry) => ipcRenderer.invoke('backend:saveRefactoringHistory', entry),
+clearRefactoringHistory: () => ipcRenderer.invoke('backend:clearRefactoringHistory'),
+- Track all past refactorings (undo/redo history)
+
+[CRITICAL LINE: Line 123]
+renameSymbol: (opts) => ipcRenderer.invoke('backend:renameSymbol', opts),
+- Cross-file symbol renaming (e.g., rename "calculate" method across all .java files)
+
+[CRITICAL LINE: Line 125-132]
+// --- Path helpers ---
+pathSep: () => ipcRenderer.invoke('path:sep'),
+pathBasename: (p) => ipcRenderer.invoke('path:basename', p),
+pathDirname: (p) => ipcRenderer.invoke('path:dirname', p),
+pathJoin: (...parts) => ipcRenderer.invoke('path:join', ...parts),
+pathExtname: (p) => ipcRenderer.invoke('path:extname', p),
+- **WRAPPER FUNCTIONS**: Path manipulation in main process (cross-platform)
+- Why not use Node path locally? Renderer can't require('path') (sandboxed)
+
+[CRITICAL LINE: Line 140-148]
+// --- Menu event listeners ---
+onMenuEvent: (channel, callback) => {
+  const handler = (event, ...args) => callback(...args);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+},
+
+// --- Misc ---
+getAppPath: (name) => ipcRenderer.invoke('app:getPath', name),
+openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+- Menu listeners: File → New File, Edit → Undo, View → Toggle Explorer, etc.
+- getAppPath('documents'), getAppPath('home'): OS-specific paths
+- openExternal(url): open URL in default browser (e.g., GitHub links)
+
+---
+
+SECTION 2: SECURITY MODEL
+
+The preload.js enforces security through:
+1. Whitelist pattern: only exposed methods can be called
+2. No require(): renderer can't dynamically load modules
+3. No global access: window.fs, window.require don't exist
+4. Message passing: all operations go through IPC (logged/filtered)
+5. No direct file access: all FS ops must go through main.js
+
+Example attack mitigated:
+  Malicious script in renderer: window.fs.readFile('/etc/passwd')
+  Result: fs not exposed → TypeError: window.fs is undefined ✓
+
+Real interface:
+  Legitimate code: await api.readFile('./MyFile.java')
+  Result: IPC call → main.js → fs.readFile() → response ✓
+
+================================================================================
+                        FILE 3: renderer.js (MAIN RENDERER)
+================================================================================
+
+Location: desktop-app/renderer.js
+Purpose: Renderer process logic - UI state management, Monaco editor,
+         event listeners, refactoring UI, terminal, panels
+
+Size: ~2500 lines (LARGEST FILE - complexity center)
+Critical Role: APP LOGIC and USER INTERACTION
+
+---
+
+SECTION 1: INITIALIZATION & STATE (Lines 1-40)
+
+[CRITICAL LINE: Line 1-12]
+(function () {
+  'use strict';
+
+  window.addEventListener('error', (e) => {
+    console.error('[CodeNova] Uncaught error:', e.message, e.filename, e.lineno);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    console.error('[CodeNova] Unhandled promise rejection:', e.reason);
+  });
+- **IIFE PATTERN** (Immediately Invoked Function Expression)
+- Wraps entire file in function scope (prevents global namespace pollution)
+- Global error handlers: catch and log uncaught exceptions
+- Prevents one broken binding from killing entire app
+
+[CRITICAL LINE: Line 15]
+const api = window.electronAPI;
+- **THE SECURE API**: window.electronAPI created by preload.js contextBridge
+- All renderer-to-main communication goes through api.*
+
+[CRITICAL LINE: Line 19-40]
+const state = {
+  workspacePath: null,
+  openTabs: [],                    // { id, filePath, label, model, isDirty, isUntitled }
+  activeTabId: null,
+  editor: null,                    // Monaco editor instance
+  terminal: null,                  // xterm Terminal instance
+  terminalId: null,                // pty process id from main
+  terminalFit: null,               // FitAddon instance
+  autoSave: false,
+  panelVisible: true,
+  sidebarVisible: true,
+  nextUntitledId: 1,
+  contextMenuTarget: null,         // for right-click actions
+  backendReady: false,             // FastAPI backend status
+  errorCheckTimer: null,           // debounce timer for real-time error checking
+  lastAnalysis: null,              // cached analysis result
+  lastRefactoring: null,           // cached refactoring result
+  graphExpanded: false,            // graph panel expanded/collapsed
+  diffSession: null,               // current diff review session { session_id, ... }
+};
+- **GLOBAL STATE OBJECT**: All UI state in one place (not scattered)
+- tabs: array of open files {id, filePath, label, monaco model, isDirty, isUntitled}
+- activeTabId: which tab is currently shown in editor
+- editor: Monaco editor instance (main text editor)
+- terminal: xterm Terminal instance
+- terminalId: ID assigned by main.js pty process
+- autoSave: user toggle
+- backendReady: health status of FastAPI backend
+- errorCheckTimer: debounce timer (accumulating keystrokes before error check)
+- diffSession: active refactoring review session
+
+---
+
+SECTION 2: MONACO EDITOR INITIALIZATION (Lines 43-120)
+
+[CRITICAL LINE: Line 45-50]
+function initMonaco() {
+  return new Promise((resolve) => {
+    const amdLoader = document.createElement('script');
+    amdLoader.src = 'node_modules/monaco-editor/min/vs/loader.js';
+    amdLoader.onload = () => {
+      window.require.config({
+        paths: { vs: 'node_modules/monaco-editor/min/vs' }
+      });
+- **ASYNCHRONOUS LOADING**: Monaco is large (5MB minified)
+- Script tag injects loader.js (AMD module loader)
+- require.config(): tell loader where to find Monaco modules
+
+[CRITICAL LINE: Line 51-80]
+window.require(['vs/editor/editor.main'], () => {
+  monaco.editor.defineTheme('codenova-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [],
+    colors: {
+      'editor.background': '#1e1e1e',
+      'editor.foreground': '#d4d4d4',
+      'editorCursor.foreground': '#aeafad',
+      ...
+    }
+  });
+- **CUSTOM THEME DEFINITION**: VS Code Dark+ colored
+- All theme colors from CSS variables (dark theme matching VS Code)
+- Editor background, text color, cursor, selection, indentation, tabs
+
+[CRITICAL LINE: Line 82-105]
+state.editor = monaco.editor.create(document.getElementById('monaco-container'), {
+  value: '',
+  language: 'plaintext',
+  theme: 'codenova-dark',
+  fontSize: 14,
+  fontFamily: "'Cascadia Code', 'Fira Code', 'Droid Sans Mono', Consolas, 'Courier New', monospace",
+  minimap: { enabled: true },
+  scrollBeyondLastLine: true,
+  automaticLayout: true,
+  tabSize: 4,
+  wordWrap: 'off',
+  renderWhitespace: 'selection',
+  cursorBlinking: 'blink',
+  cursorSmoothCaretAnimation: 'on',
+  smoothScrolling: true,
+  bracketPairColorization: { enabled: true },
+  guides: { bracketPairs: true, indentation: true },
+  suggest: { snippetsPreventQuickSuggestions: false },
+  padding: { top: 8 },
+});
+- **EDITOR CREATION**: Configures Monaco with UI preferences
+- value: initial content (empty)
+- language: initial language (plaintext until file opened)
+- theme: use custom 'codenova-dark' theme (defined above)
+- fontSize: 14px
+- fontFamily: cascading list (try first, fall back to next)
+  - Cascadia Code: Microsoft's modern monospace (VS 2022 default)
+  - Fira Code: open source with ligatures
+  - Fallback to Consolas or Courier New
+- automaticLayout: true = resize editor when container resizes
+- tabSize: 4 spaces per tab
+- wordWrap: 'off' = horizontal scrolling (no line wrapping)
+- renderWhitespace: 'selection' = show spaces/tabs only when text selected
+- cursorBlinking: 'blink' = cursor animation
+- bracketPairColorization: match bracket pairs with colors
+- guides: visual indentation helpers
+
+[CRITICAL LINE: Line 107-110]
+state.editor.onDidChangeCursorPosition((e) => {
+  const pos = e.position;
+  document.getElementById('status-cursor').textContent = `Ln ${pos.lineNumber}, Col ${pos.column}`;
+});
+- **EVENT LISTENER**: When cursor position changes
+- Update status bar to show "Ln X, Col Y"
+
+[CRITICAL LINE: Line 112-122]
+state.editor.onDidChangeModelContent(() => {
+  const tab = getActiveTab();
+  if (tab && !tab.isDirty) {
+    tab.isDirty = true;
+    renderTabs();
+  }
+  if (state.autoSave && tab) {
+    clearTimeout(tab._autoSaveTimer);
+    tab._autoSaveTimer = setTimeout(() => saveFile(tab.id), 1000);
+  }
+  scheduleErrorCheck();
+});
+- **CRITICAL EVENT**: User types in editor
+- Mark tab as dirty (modified dot appears on tab)
+- If autoSave enabled: clear previous timer, set new 1s timer
+- After 1s of no typing, save file automatically
+- scheduleErrorCheck(): debounced error analysis (explained below)
+
+[CRITICAL LINE: Line 124-136]
+state.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+  saveFile(state.activeTabId);
+});
+
+state.editor.addCommand(monaco.KeyCode.F5, () => {
+  runCurrentFile();
+});
+- **KEYBINDINGS**: Wire editor shortcuts to functions
+- Ctrl+S → save
+- F5 → run file
+
+---
+
+SECTION 3: LANGUAGE DETECTION (Lines 154-180)
+
+[CRITICAL LINE: Line 154-177]
+const EXT_LANG_MAP = {
+  '.js': 'javascript', '.jsx': 'javascript',
+  '.ts': 'typescript', '.tsx': 'typescript',
+  '.py': 'python',
+  '.java': 'java',
+  ...
+  '.txt': 'plaintext',
+  '.log': 'plaintext',
+  '.csv': 'plaintext',
+};
+
+function detectLanguage(filePath) {
+  if (!filePath) return 'plaintext';
+  const fileName = filePath.split(/[\\/]/).pop().toLowerCase();
+  if (fileName === 'dockerfile') return 'dockerfile';
+  if (fileName === 'makefile') return 'makefile';
+  const ext = '.' + fileName.split('.').pop();
+  return EXT_LANG_MAP[ext] || 'plaintext';
+}
+- **AUTO SYNTAX HIGHLIGHTING**: Detects language from file extension
+- .java → 'java' language (Monaco loads Java syntax highlighter)
+- Special cases: Dockerfile, Makefile (no extension)
+- Unknown → 'plaintext' (no highlighting)
+- Used when opening file or switching tabs
+
+---
+
+SECTION 4: TAB MANAGEMENT (Lines 205-280)
+
+[CRITICAL LINE: Line 205-230]
+function createTab(filePath, content, isUntitled = false) {
+  const existing = state.openTabs.find(t => t.filePath === filePath && !t.isUntitled);
+  if (existing) {
+    activateTab(existing.id);
+    return existing;
+  }
+
+  const id = Date.now() + '-' + Math.random().toString(36).substr(2, 5);
+  const label = isUntitled
+    ? `Untitled-${state.nextUntitledId++}`
+    : filePath.split(/[\\/]/).pop();  // filename only
+
+  const lang = isUntitled ? 'plaintext' : detectLanguage(filePath);
+  const model = monaco.editor.createModel(content || '', lang);
+
+  const tab = { id, filePath, label, model, isDirty: false, isUntitled };
+  state.openTabs.push(tab);
+  activateTab(id);
+  return tab;
+}
+- **CREATE NEW TAB**: For opened file or untitled document
+- Guard: if file already open, just activate it (don't duplicate)
+- Tab ID: timestamp + random (ensures unique)
+- Label: filename (e.g., "MyFile.java") or "Untitled-1"
+- Monaco Model: internal representation of file content + language
+- Push to openTabs array, activate it
+
+[CRITICAL LINE: Line 232-250]
+function activateTab(tabId) {
+  state.activeTabId = tabId;
+  const tab = state.openTabs.find(t => t.id === tabId);
+  if (!tab) return;
+
+  document.getElementById('welcome-tab').style.display = 'none';
+  document.getElementById('monaco-container').style.display = 'block';
+
+  state.editor.setModel(tab.model);
+  const lang = tab.model.getLanguageId();
+  document.getElementById('status-language').textContent = lang.charAt(0).toUpperCase() + lang.slice(1);
+
+  renderTabs();
+  setTimeout(() => state.editor.focus(), 50);
+
+  if (isJavaFile(tab) && state.backendReady) {
+    updateGraph();
+  }
+}
+- **SWITCH TO TAB**: Make it the active editor view
+- Hide welcome screen, show editor
+- setModel(): switch editor to display this file's content
+- Update status bar language
+- Re-render tab bar (highlight active tab)
+- Focus editor (so keyboard shortcuts work)
+- If Java file: update dependency graph
+
+[CRITICAL LINE: Line 252-270]
+function closeTab(tabId) {
+  const idx = state.openTabs.findIndex(t => t.id === tabId);
+  if (idx === -1) return;
+
+  const tab = state.openTabs[idx];
+  // TODO: prompt save if dirty
+  tab.model.dispose();
+  state.openTabs.splice(idx, 1);
+
+  if (state.activeTabId === tabId) {
+    if (state.openTabs.length > 0) {
+      const next = state.openTabs[Math.min(idx, state.openTabs.length - 1)];
+      activateTab(next.id);
+    } else {
+      state.activeTabId = null;
+      document.getElementById('welcome-tab').style.display = 'flex';
+      document.getElementById('monaco-container').style.display = 'none';
+      document.getElementById('status-language').textContent = 'Plain Text';
+      document.getElementById('status-cursor').textContent = 'Ln 1, Col 1';
+    }
+  }
+  renderTabs();
+}
+- **CLOSE TAB**: Remove file from open tabs
+- model.dispose(): deallocate memory
+- If was active tab: switch to next tab or show welcome
+- If no more tabs: show welcome screen
+
+---
+
+SECTION 5: FILE OPERATIONS (Lines 305-370)
+
+[CRITICAL LINE: Line 305-310]
+async function openFileDialog() {
+  const result = await api.openFile();
+  if (!result.canceled) {
+    createTab(result.path, result.content);
+  }
+}
+- **FILE OPEN**: User clicks File → Open
+- api.openFile() calls IPC handler in main.js
+- Returns {canceled, path, content}
+- Creates tab with file content
+
+[CRITICAL LINE: Line 312-325]
+async function openFolderDialog() {
+  const result = await api.openFolder();
+  if (!result.canceled) {
+    state.workspacePath = result.path;
+    const folderName = result.path.split(/[\\/]/).pop();
+    document.getElementById('workspace-name').textContent = folderName.toUpperCase();
+    document.getElementById('open-folder-prompt').style.display = 'none';
+    document.getElementById('explorer-actions').style.display = 'flex';
+    await renderFileTree(result.path, document.getElementById('file-tree'));
+    setTimeout(() => gitRefresh(), 500);
+  }
+}
+- **FOLDER OPEN**: User clicks File → Open Folder
+- Stores folder path globally
+- Shows folder name in sidebar header
+- Renders file tree (recursively list all files/folders)
+- Auto-refreshes Git status
+
+[CRITICAL LINE: Line 345-365]
+async function saveFile(tabId) {
+  const tab = state.openTabs.find(t => t.id === tabId);
+  if (!tab) return;
+
+  const content = tab.model.getValue();
+
+  if (tab.isUntitled) {
+    const result = await api.saveAs({ defaultPath: tab.label });
+    if (result.canceled) return;
+    tab.filePath = result.path;
+    tab.label = result.path.split(/[\\/]/).pop();
+    tab.isUntitled = false;
+    const lang = detectLanguage(tab.filePath);
+    monaco.editor.setModelLanguage(tab.model, lang);
+  }
+
+  await api.writeFile(tab.filePath, content);
+  tab.isDirty = false;
+  renderTabs();
+}
+- **SAVE FILE**: Ctrl+S pressed
+- Get content from editor model
+- If untitled: prompt save-as dialog (assign real filename)
+- Write to disk via IPC
+- Mark as not dirty (remove dot from tab)
+
+---
+
+SECTION 6: FILE TREE & EXPLORER (Lines 375-460)
+
+[CRITICAL LINE: Line 375-410]
+async function renderFileTree(dirPath, container, depth = 0) {
+  container.innerHTML = '';
+  try {
+    const items = await api.readDir(dirPath);
+    items.forEach(item => {
+      const itemEl = document.createElement('div');
+
+      if (item.isDirectory) {
+        const headerEl = document.createElement('div');
+        headerEl.className = 'tree-item';
+        headerEl.style.paddingLeft = (8 + depth * 16) + 'px';
+        headerEl.dataset.path = item.path;
+        headerEl.dataset.isDir = 'true';
+        headerEl.innerHTML = `
+          <span class="tree-chevron codicon codicon-chevron-down collapsed"></span>
+          ${getFileIcon(item.name, true, false)}
+          <span class="tree-label">${escapeHtml(item.name)}</span>
+        `;
+
+        const childContainer = document.createElement('div');
+        childContainer.className = 'tree-item-children';
+
+        let loaded = false;
+        headerEl.addEventListener('click', async () => {
+          const chevron = headerEl.querySelector('.tree-chevron');
+          const isExpanded = childContainer.classList.contains('expanded');
+          if (isExpanded) {
+            childContainer.classList.remove('expanded');
+            chevron.classList.add('collapsed');
+            // Change icon from folder-open to folder
+          } else {
+            if (!loaded) {
+              await renderFileTree(item.path, childContainer, depth + 1);  // RECURSIVE
+              loaded = true;
+            }
+            childContainer.classList.add('expanded');
+            chevron.classList.remove('collapsed');
+          }
+        });
+- **RECURSIVE FILE TREE**: Shows folder structure
+- items = api.readDir() returns all files/folders in directory
+- For directories: create collapsible header
+- Indentation: depth * 16px (deeper folders indent more)
+- Click to toggle expanded/collapsed
+- On first expand: lazy-load children (don't load all at startup)
+- **VIRTUALIZATION**: Large projects don't load entire tree upfront
+- Label with file/folder icon
+
+[CRITICAL LINE: Line 440-460]
+// Context menu actions
+document.querySelectorAll('.context-menu-item').forEach(item => {
+  item.addEventListener('click', async () => {
+    const action = item.dataset.action;
+    const target = state.contextMenuTarget;
+    if (!target) return;
+
+    switch (action) {
+      case 'newFile': {
+        const name = await showInlineInput('File name...');
+        if (name) {
+          await api.createFile(target.isDirectory ? target.path + sep + name : parentDir + name);
+          refreshFileTree();
+        }
+        break;
+      }
+      case 'delete': {
+        if (confirm(`Delete "${target.name}"?`)) {
+          await api.deleteItem(target.path);
+          refreshFileTree();
+        }
+        break;
+      }
+    }
+  });
+});
+- **CONTEXT MENU**: Right-click on file/folder
+- Actions: New File, New Folder, Rename, Delete, Copy Path
+- Each action calls IPC handler for file operations
+- Refresh file tree after changes
+
+---
+
+SECTION 7: INTEGRATED TERMINAL (Lines 475-570)
+
+[CRITICAL LINE: Line 475-485]
+async function initTerminal() {
+  try {
+    const xtermCss = document.createElement('link');
+    xtermCss.rel = 'stylesheet';
+    xtermCss.href = 'node_modules/xterm/css/xterm.css';
+    document.head.appendChild(xtermCss);
+
+    // Temporarily hide AMD define so xterm UMD scripts attach to window
+    const savedDefine = window.define;
+    window.define = undefined;
+- **TERMINAL INITIALIZATION**: Complex setup for xterm.js
+- Load xterm CSS (terminal styling)
+- **TRICK**: Temporarily hide window.define
+  - Monaco defines AMD loader (window.define)
+  - xterm expects UMD pattern (attach to window)
+  - Conflict! Solution: hide define, load xterm, restore define
+
+[CRITICAL LINE: Line 487-495]
+await loadScript('node_modules/xterm/lib/xterm.js');
+await loadScript('node_modules/xterm-addon-fit/lib/xterm-addon-fit.js');
+await loadScript('node_modules/xterm-addon-web-links/lib/xterm-addon-web-links.js');
+
+window.define = savedDefine;
+
+const TerminalCtor = window.Terminal?.Terminal || window.Terminal;
+const FitAddonCtor = window.FitAddon?.FitAddon || window.FitAddon;
+- **LOAD SCRIPTS**: Sequentially load xterm libraries (must be in order)
+- Restore AMD define for Monaco
+- Extract constructors from window (UMD attached them)
+- Nullish coalescing: .Terminal?.Terminal (optional chaining)
+
+[CRITICAL LINE: Line 508-530]
+const term = new TerminalCtor({
+  fontFamily: "'Cascadia Code', 'Fira Code', Consolas, 'Courier New', monospace",
+  fontSize: 13,
+  theme: {
+    background: '#1e1e1e',
+    foreground: '#cccccc',
+    cursor: '#aeafad',
+    ...
+  },
+  cursorBlink: true,
+  allowTransparency: true,
+});
+
+if (fitAddon) term.loadAddon(fitAddon);
+if (webLinksAddon) term.loadAddon(webLinksAddon);
+
+const container = document.getElementById('terminal-container');
+term.open(container);
+
+state.terminal = term;
+state.terminalFit = fitAddon;
+
+const cwd = state.workspacePath || undefined;
+const id = await api.createTerminal({ cols: term.cols, rows: term.rows, cwd });
+state.terminalId = id;
+- **CREATE TERMINAL INSTANCE**
+- Configure theme (dark colors matching editor)
+- Load addons: FitAddon (auto-resize), WebLinksAddon (clickable URLs)
+- Open into container DOM element
+- **CRITICAL**: Call api.createTerminal()
+  - Requests main.js to create PTY process
+  - Returns terminal ID
+  - Used in sendTerminalData, resizeTerminal calls
+
+[CRITICAL LINE: Line 543-558]
+term.onData((data) => {
+  api.writeTerminal(id, data);
+});
+
+api.onTerminalData(({ id: tid, data }) => {
+  if (tid === state.terminalId) term.write(data);
+});
+
+api.onTerminalExit(({ id: tid }) => {
+  if (tid === state.terminalId) {
+    term.writeln('\r\n\x1b[90m[Process exited]\x1b[0m');
+    state.terminalId = null;
+  }
+});
+- **BIDIRECTIONAL WIRING**: Terminal ↔ PTY
+- User types in terminal → term.onData fires → send to PTY via api.writeTerminal
+- PTY outputs → IPC 'terminal:data' → api.onTerminalData fires → term.write
+- PTY exits → IPC 'terminal:exit' → show [Process exited] in terminal
+
+[CRITICAL LINE: Line 561-572]
+const resizeObserver = new ResizeObserver(() => {
+  try {
+    if (fitAddon) fitAddon.fit();
+    if (state.terminalId) {
+      api.resizeTerminal(state.terminalId, term.cols, term.rows);
+    }
+  } catch (_) {}
+});
+resizeObserver.observe(container);
+- **RESPONSIVE TERMINAL**: Auto-resize when window resizes
+- ResizeObserver fires when container DOM element resizes
+- fitAddon.fit() recalculates cols/rows based on container size
+- Send new dimensions back to PTY via api.resizeTerminal()
+
+---
+
+SECTION 8: BACKEND INTEGRATION (Lines 583-700)
+
+[CRITICAL LINE: Line 583-592]
+function updateBackendStatus(running) {
+  state.backendReady = running;
+  const el = document.getElementById('backend-status');
+  if (running) {
+    el.className = 'refactoring-status connected';
+    el.innerHTML = '<i class="codicon codicon-circle-filled"></i><span>Engine connected</span>';
+  } else {
+    el.className = 'refactoring-status disconnected';
+    el.innerHTML = '<i class="codicon codicon-circle-filled"></i><span>Engine offline</span>';
+  }
+  document.querySelectorAll('.btn-refactor').forEach(btn => {
+    btn.disabled = !running;
+  });
+}
+- **STATUS INDICATOR**: Updates status bar to show backend health
+- Green dot + "Engine connected" if running
+- Red dot + "Engine offline" if not
+- Disables refactoring buttons when backend offline
+
+[CRITICAL LINE: Line 597-602]
+api.onBackendStatus(({ running }) => updateBackendStatus(running));
+
+async function checkBackendHealth() {
+  try {
+    const result = await api.backendHealth();
+    updateBackendStatus(result.status === 'healthy');
+  } catch {
+    updateBackendStatus(false);
+  }
+}
+- **HEALTH CHECK**: Periodically verify backend is running
+- On startup call checkBackendHealth()
+- Listen for 'backend:status' IPC events (main.js sends updates)
+
+[CRITICAL LINE: Line 608-670]
+async function refactorCode() {
+  const tab = getActiveTab();
+  const code = getActiveJavaCode();
+  if (!code) { showNotification('Open a Java file first.', 'error'); return; }
+  if (!state.backendReady) { showNotification('Backend is not running.', 'error'); return; }
+
+  const selected = getSelectedRefactorings();
+  appendRefactoringOutput('\n[Refactoring] Previewing: ' + selected.join(', ') + '...\n');
+  showPanel('refactoring-output-panel');
+  ensurePanelVisible();
+
+  try {
+    const result = await api.backendRefactorReview({
+      java_code: code,
+      selected_refactorings: selected.length > 0 ? selected : null
+    });
+
+    if (result.detail) {
+      showNotification('Refactoring failed: ' + result.detail, 'error');
+      appendRefactoringOutput('[Error] ' + result.detail + '\n');
+      return;
+    }
+
+    state.diffSession = result;
+
+    if (!result.diff || result.diff.trim() === '') {
+      showNotification('Code is already clean — no changes needed.', 'info');
+      appendRefactoringOutput('[Info] No refactoring changes needed — code is already clean.\n');
+      state.diffSession = null;
+      renderRefactoringActions(result.actions || []);
+      if (result.metrics_before && result.metrics_after) {
+        renderMetricsComparison(result.metrics_before, result.metrics_after);
+      }
+      return;
+    }
+
+    showDiffOverlay(result);
+    appendRefactoringOutput('[Preview] Diff ready — Accept or Reject changes.\n');
+
+    renderRefactoringActions(result.actions || []);
+    if (result.metrics_before && result.metrics_after) {
+      renderMetricsComparison(result.metrics_before, result.metrics_after);
+    }
+
+  } catch (err) {
+    showNotification('Refactoring error: ' + (err.message || 'Unknown error'), 'error');
+    appendRefactoringOutput('[Error] ' + (err.message || 'Unknown error') + '\n');
+  }
+}
+- **REFACTORING PREVIEW**: User clicks Refactor button
+- Validates: file open, backend ready
+- Gets selected refactoring types (checkboxes)
+- Calls api.backendRefactorReview() → FastAPI /refactor/review
+- Backend returns: session_id, diff, original_code, refactored_code, actions, metrics
+- If no changes needed: show green "already clean" message
+- Otherwise: show diff overlay for user to accept/reject
+
+[CRITICAL LINE: Line 689-740]
+let diffEditorInstance = null;
+
+function showDiffOverlay(result) {
+  const overlay = document.getElementById('diff-overlay');
+  const diffContainer = document.getElementById('diff-editor-container');
+  const summary = document.getElementById('diff-summary');
+
+  const originalCode = result.original_code || '';
+  const modifiedCode = result.refactored_code || '';
+
+  const origLines = originalCode.split('\n');
+  const modLines = modifiedCode.split('\n');
+  const added = modLines.length - origLines.length;
+  summary.textContent = added >= 0 ? `+${added} lines` : `${added} lines`;
+
+  overlay.style.display = 'flex';
+
+  if (diffEditorInstance) {
+    diffEditorInstance.dispose();
+    diffEditorInstance = null;
+  }
+
+  setTimeout(() => {
+    diffEditorInstance = monaco.editor.createDiffEditor(diffContainer, {
+      theme: 'codenova-dark',
+      readOnly: true,
+      automaticLayout: true,
+      renderSideBySide: true,
+      enableSplitViewResizing: true,
+      fontSize: 13,
+    });
+
+    const originalModel = monaco.editor.createModel(originalCode, 'java');
+    const modifiedModel = monaco.editor.createModel(modifiedCode, 'java');
+
+    diffEditorInstance.setModel({
+      original: originalModel,
+      modified: modifiedModel,
+    });
+  }, 50);
+}
+- **DIFF VIEWER**: Side-by-side comparison of original vs refactored
+- Monaco DiffEditor: original on left, modified on right
+- Highlights changed lines (red = removed, green = added)
+- Summary: shows line count difference (+5 lines, -3 lines, etc.)
+- readOnly: user can't edit in preview
+- renderSideBySide: column layout (not inline)
+
+[CRITICAL LINE: Line 757-780]
+async function acceptRefactoring() {
+  if (!state.diffSession) return;
+  try {
+    const result = await api.backendRefactorDecision({
+      session_id: state.diffSession.session_id,
+      action: 'accept'
+    });
+    if (result.final_code) {
+      const tab = getActiveTab();
+      if (tab && tab.model) {
+        try {
+          await api.saveRefactoringHistory({
+            timestamp: new Date().toISOString(),
+            file_path: tab.filePath || tab.label,
+            actions: state.diffSession.actions || [],
+            original_code: state.diffSession.original_code || '',
+            refactored_code: result.final_code,
+            metrics_before: state.diffSession.metrics_before || null,
+            metrics_after: state.diffSession.metrics_after || null,
+          });
+        } catch (_) {}
+
+        tab.model.setValue(result.final_code);
+        tab.isDirty = true;
+        renderTabs();
+      }
+    }
+    appendRefactoringOutput('[Accepted] Refactored code applied.\n');
+  } catch (err) {
+    appendRefactoringOutput('[Error] ' + err.message + '\n');
+  }
+  hideDiffOverlay();
+}
+- **ACCEPT REFACTORING**: User clicks Accept button
+- Call api.backendRefactorDecision with session_id + 'accept'
+- Backend returns final_code
+- Save to refactoring history (for undo later)
+- Update editor model with new code (tab.model.setValue)
+- Mark as dirty (orange dot on tab)
+- Hide diff overlay
+
+[CRITICAL LINE: Line 792-800]
+async function rejectRefactoring() {
+  if (!state.diffSession) return;
+  try {
+    await api.backendRefactorDecision({
+      session_id: state.diffSession.session_id,
+      action: 'reject'
+    });
+    appendRefactoringOutput('[Rejected] Changes discarded.\n');
+  } catch (err) {
+    // Session may have expired - that's fine
+  }
+  hideDiffOverlay();
+}
+- **REJECT REFACTORING**: User clicks Reject button
+- Call api.backendRefactorDecision with 'reject'
+- Backend discards session (already stored original code)
+- Hide overlay, keep original code in editor
+
+---
+
+SECTION 9: DEPENDENCY GRAPH (Lines 802-880)
+
+[CRITICAL LINE: Line 802-818]
+async function updateGraph() {
+  const code = getActiveJavaCode();
+  const canvasWrapper = document.getElementById('graph-canvas-wrapper');
+  const emptyState = document.getElementById('graph-empty');
+  const canvas = document.getElementById('graph-canvas');
+
+  if (!code || !state.backendReady || !isJavaFile(getActiveTab())) {
+    if (emptyState) emptyState.style.display = 'flex';
+    return;
+  }
+
+  try {
+    const result = await api.backendDependencyGraph({ java_code: code });
+    if (result.detail) return;
+
+    if (emptyState) emptyState.style.display = 'none';
+    drawRadarChart(canvas, result.radar);
+  } catch (err) {
+    console.warn('Graph update failed:', err.message);
+  }
+}
+- **DEPENDENCY GRAPH**: Visualizes code complexity on radar chart
+- Calls api.backendDependencyGraph() → FastAPI /dependency-graph
+- Backend analyzes Java code, returns radar metrics:
+  - maintainability: 0-100 (higher = better)
+  - simplicity: cyclomatic complexity (lower = better)
+  - readability: comment/code ratio (higher = better)
+  - modularity: coupling/cohesion (higher = better)
+  - duplication_free: 0-100 (higher = less duplication)
+- Draws 5-point radar chart centered in sidebar panel
+
+[CRITICAL LINE: Line 820-880]
+function drawRadarChart(canvas, radar) {
+  if (!radar || !radar.labels) return;
+  const ctx = canvas.getContext('2d');
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * (window.devicePixelRatio || 1);
+  canvas.height = rect.height * (window.devicePixelRatio || 1);
+  ctx.scale(window.devicePixelRatio || 1, window.devicePixelRatio || 1);
+
+  const w = rect.width;
+  const h = rect.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const r = Math.min(cx, cy) - 30;
+  const labels = radar.labels;
+  const values = radar.values;
+  const n = labels.length;
+  const angleStep = (2 * Math.PI) / n;
+  const startAngle = -Math.PI / 2;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // Draw grid rings
+  for (let ring = 1; ring <= 5; ring++) {
+    const ringR = (r / 5) * ring;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const angle = startAngle + i * angleStep;
+      const x = cx + ringR * Math.cos(angle);
+      const y = cy + ringR * Math.sin(angle);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+
+  // Draw axes...
+  // Draw data polygon...
+  // Draw data points...
+  // Draw labels...
+  // Draw value labels on points...
+}
+- **RADAR CHART DRAWING**: Low-level Canvas API (2D Graphics)
+- w, h: canvas dimensions
+- cx, cy: center point
+- r: radius of chart
+- angleStep: angle between each axis (360° / n dimensions)
+- Ring loops: draw concentric circles (grid)
+- Axes: draw lines from center to edge for each dimension
+- Data polygon: connect points (values) to form pentagon/star shape
+- Filled with gradient: rgba(127, 86, 217, 0.25) (purple transparency)
+- Value labels: numbers 0-100 at each point
+
+---
+
+SECTION 10: ERROR CHECKING & ANALYSIS (Lines 905-970)
+
+[CRITICAL LINE: Line 905-915]
+async function analyzeCode() {
+  const code = getActiveJavaCode();
+  if (!code) { appendRefactoringOutput('[Error] Open a Java file first.\n'); return; }
+  if (!state.backendReady) { appendRefactoringOutput('[Error] Backend is not running.\n'); return; }
+
+  appendRefactoringOutput('\n[Analyzing] Scanning code...\n');
+
+  try {
+    const result = await api.backendAnalyze({ java_code: code });
+    state.lastAnalysis = result;
+
+    if (result.detail) {
+      appendRefactoringOutput('[Error] ' + result.detail + '\n');
+      return;
+    }
+
+    renderCodeSmells(result.code_smells || []);
+    renderOpportunities(result.refactoring_opportunities || []);
+    if (result.metrics) renderMetrics(result.metrics);
+    appendRefactoringOutput('[Done] Found ' + (result.code_smells?.length || 0) +
+      ' smells, ' + (result.refactoring_opportunities?.length || 0) + ' opportunities.\n');
+
+    document.querySelector('.activitybar-item[data-panel="analysis"]')?.click();
+  } catch (err) {
+    appendRefactoringOutput('[Error] ' + err.message + '\n');
+  }
+}
+- **CODE ANALYSIS**: User clicks Analyze button
+- Calls api.backendAnalyze() → FastAPI /analyze endpoint
+- Backend returns:
+  - code_smells: array of detected issues
+  - refactoring_opportunities: suggested transformations
+  - metrics: code quality measurements
+- Renders UI with findings
+- Switches sidebar to Analysis panel
+
+[CRITICAL LINE: Line 930-940]
+async function checkErrors() {
+  const code = getActiveJavaCode();
+  if (!code) return;
+  if (!state.backendReady) return;
+
+  try {
+    const result = await api.backendCheckErrors({ java_code: code });
+    if (result.detail) return;
+    renderProblems(result);
+  } catch (err) {
+    console.warn('Error check failed:', err.message);
+  }
+}
+- **ERROR CHECKING**: Real-time Java syntax checking
+- Calls api.backendCheckErrors() → FastAPI /check-errors
+- Returns: syntax_errors, runtime_errors, warnings
+- renderProblems(): displays errors in Problems panel
+
+[CRITICAL LINE: Line 942-950]
+function scheduleErrorCheck() {
+  if (state.errorCheckTimer) clearTimeout(state.errorCheckTimer);
+  state.errorCheckTimer = setTimeout(() => {
+    const tab = getActiveTab();
+    if (tab && isJavaFile(tab) && state.backendReady) {
+      checkErrors();
+    }
+  }, 800);
+}
+- **DEBOUNCED ERROR CHECK**: Called every keystroke
+- Logic:
+  1. User types 'p' → clear any pending timer, start 800ms timer
+  2. User types 'u' → clear 800ms timer (restart), start new 800ms timer
+  3. User types 'b' → clear 800ms timer, start new 800ms timer
+  4. User pauses for 800ms → timer fires → run checkErrors() once
+- Result: 100 keystrokes = 1 error check (not 100)
+- **Why 800ms?** Balances responsiveness vs performance
+  - Too short: CPU spike, freeze on every keystroke
+  - Too long: user sees errors delayed
+
+================================================================================
+                        FILE 4: index.html
+================================================================================
+
+Location: desktop-app/index.html
+Purpose: HTML document structure - defines layout, panels, panels for sidebar
+
+Size: ~300 lines (mostly HTML structure, not logic)
+
+Key Sections:
+1. Head: Meta tags, CSP (Content Security Policy), CSS imports
+2. Workbench: Main container, flexbox layout
+3. Activity Bar: Left icon strip (Explorer, Search, Git, Refactoring, etc.)
+4. Sidebar: File tree, search, source control, refactoring panels
+5. Editor area: Monaco editor container
+6. Bottom panels: Terminal, Output, Problems
+7. Modals: Diff viewer, rename dialog, git dialogs
+
+[CRITICAL LINE: Line 3]
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; img-src 'self' data:;">
+- **SECURITY**: Content Security Policy restricts what can be loaded
+- default-src 'self': only allow same-origin resources
+- connect-src 'self' http://127.0.0.1:8000: allow HTTP calls to backend
+- style-src 'unsafe-inline': allow inline <style> tags
+- script-src 'unsafe-inline' 'unsafe-eval': allow inline scripts (Monaco needs this)
+- Prevents XSS attacks (injected scripts can't call external URLs)
+
+[CRITICAL LINE: Line 8-9]
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="node_modules/@vscode/codicons/dist/codicon.css">
+- styles.css: custom UI styling (dark theme, layout)
+- codicon.css: VS Code icon font (folder, file, settings icons, etc.)
+
+[CRITICAL LINE: Line 15]
+<div id="workbench">
+- Root container for entire app
+- Flexbox layout: activitybar | sidebar | editor | panel
+
+[CRITICAL LINE: Line 17-30]
+<div id="activitybar">
+  <div class="activitybar-top">
+    <button class="activitybar-item active" data-panel="explorer" title="Explorer (Ctrl+Shift+E)">
+      <i class="codicon codicon-files"></i>
+    </button>
+    ...
+    <button class="activitybar-item" data-panel="refactoring" title="Refactoring (Ctrl+Shift+R)">
+      <i class="codicon codicon-wand"></i>
+    </button>
+    ...
+  </div>
+</div>
+- Activity bar: 9 buttons on left edge
+- Each button associated with sidebar panel (data-panel attribute)
+- Icons from codicon font
+- Click switches sidebar to that panel
+
+[CRITICAL LINE: Line 32+]
+<div id="sidebar">
+  <div id="panel-explorer" class="sidebar-panel active">
+    <!-- File tree content -->
+  </div>
+  <div id="panel-search" class="sidebar-panel">
+    <!-- Search panel -->
+  </div>
+  <div id="panel-source-control" class="sidebar-panel">
+    <!-- Git operations -->
+  </div>
+  ...
+</div>
+- Sidebar: contains all panels
+- Only one panel visible at a time (others hidden)
+- data-panel value matches panel ID
+- Panel click: show panel, hide others
+
+[CRITICAL LINE: Line 60+]
+<div class="sidebar-section scm-section" id="scm-staged-section">
+  <div class="sidebar-section-header" data-section="scm-staged">
+    <i class="codicon codicon-chevron-down"></i>
+    <span>Staged Changes</span>
+    <span class="scm-badge" id="scm-staged-count">0</span>
+  </div>
+  <div class="scm-file-list" id="scm-staged-list"></div>
+</div>
+- Git staging area: shows which files are staged for commit
+- data-section: tracks collapse/expand state
+- scm-badge: number of staged files
+
+[CRITICAL LINE: Line 95]
+<div id="monaco-container"></div>
+- **THE EDITOR**: Monaco editor injects here in renderer.js
+- Gets swapped out with different file content as tabs change
+
+[CRITICAL LINE: Line 100]
+<div id="terminal-container"></div>
+- **THE TERMINAL**: xterm.js injects here in renderer.js
+- User types commands here, sees shell output
+
+================================================================================
+                        FILE 5: styles.css (STYLING)
+================================================================================
+
+Location: desktop-app/styles.css
+Purpose: VS Code Dark+ theme application | Layout (flexbox) | Component styling
+
+Size: ~2500 lines (large stylesheet)
+
+Key Sections:
+1. CSS Variables: Color palette (dark theme colors)
+2. Reset & Base: global defaults
+3. Workbench Layout: main flexbox structure
+4. Activity Bar styling
+5. Sidebar styling
+6. Tab bar styling
+7. Editor area
+8. Terminal styling
+9. Responsive design
+
+[CRITICAL LINE: Line 1-40]
+:root {
+  --bg-base: #1e1e1e;
+  --bg-sidebar: #252526;
+  --bg-activitybar: #333333;
+  --bg-editor: #1e1e1e;
+  --bg-tab-active: #1e1e1e;
+  --bg-tab-inactive: #2d2d2d;
+  --color-accent: #007acc;
+  --text-primary: #cccccc;
+  --text-secondary: #969696;
+  ...
+}
+- **CSS VARIABLES**: Define color palette once
+- Used throughout stylesheet via var(--bg-base)
+- Easy theme switching: change variables, entire theme updates
+
+[CRITICAL LINE: Line 70-80]
+#workbench {
+  display: flex;
+  width: 100%;
+  height: calc(100vh - var(--statusbar-height));
+  overflow: hidden;
+}
+- Main flexbox: horizontal layout
+- height: 100vh minus status bar (22px)
+- overflow: hidden: no scrollbars (panels manage own overflow)
+
+[CRITICAL LINE: Line 85-95]
+#activitybar {
+  width: var(--activitybar-width);  /* 48px */
+  min-width: var(--activitybar-width);
+  background: var(--bg-activitybar);
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+}
+- Activity bar: 48px wide vertical column
+- Flex: arranges child buttons vertically
+- Border-right: separator line
+
+[CRITICAL LINE: Line 100+]
+#sidebar {
+  width: var(--sidebar-width);  /* 260px */
+  min-width: 40px;
+  max-width: 600px;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+- Sidebar: 260px default, min 40px (collapse), max 600px (expand)
+- Resizable: user can drag edge to change width
+- Flex column: arranges panels vertically
+
+Key Insight: Sidebar width is variable because resizable divider
+- User drags edge between sidebar and editor
+- Updates width dynamically
+- CSS: width, min-width, max-width control resize limits
+
+[CRITICAL LINE: Line 200+]
+.tab {
+  display: flex;
+  height: var(--tabbar-height);  /* 35px */
+  padding: 0 12px;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-tab-inactive);
+  color: var(--text-secondary);
+  border: 1px solid transparent;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tab.active {
+  background: var(--bg-tab-active);
+  color: var(--text-active);
+  border-bottom: 2px solid var(--accent);
+}
+
+.tab.modified::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  position: absolute;
+}
+- Tab bar styling
+- Inactive tabs: dark gray background
+- Active tab: lighter background + blue bottom border
+- Modified indicator: small dot before tab label
+
+[CRITICAL LINE: Line 350+]
+.sidebar-section {
+  border-top: 1px solid var(--border);
+}
+
+.sidebar-section-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sidebar-section-header:hover {
+  background: var(--bg-hover);
+}
+- Sidebar sections (Explorer, Search, Git, Refactoring)
+- Collapsible headers
+- Hover effect: slight background highlight
+
+[CRITICAL LINE: Line 450+]
+.tree-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-primary);
+}
+
+.tree-item:hover {
+  background: var(--bg-hover);
+}
+
+.tree-item.active {
+  background: var(--bg-selection);
+  color: var(--text-active);
+}
+- File tree items (files/folders)
+- Hover: highlight background
+- Active: blue background (selected file)
+
+[CRITICAL LINE: Line 550+]
+#terminal-container {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+  background: var(--bg-base);
+}
+
+.xterm {
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+- Terminal styling
+- Inherits xterm.css (from xterm.js)
+- Override font to match editor
+
+[CRITICAL LINE: Line 650+]
+.status-bar {
+  display: flex;
+  height: var(--statusbar-height);  /* 22px */
+  background: var(--bg-statusbar);
+  color: var(--text-primary);
+  font-size: var(--font-size-small);  /* 11px */
+  border-top: 1px solid var(--border);
+  align-items: center;
+  padding: 0 8px;
+  gap: 8px;
+}
+- Bottom status bar: "Ln 1, Col 1" | "Python" | "Engine connected"
+- Small font (11px)
+- Blue background (accent color)
+
+================================================================================
+                        CRITICAL IPC FLOW EXAMPLES
+================================================================================
+
+To understand how frontend and backend communicate, here are key flows:
+
+FLOW 1: File Save
+  1. User types in Monaco editor
+  2. User presses Ctrl+S
+  3. renderer.js receives keyboard event → calls saveFile(tabId)
+  4. Gets content from tab.model.getValue()
+  5. Calls api.writeFile(filePath, content)
+  6. IPC: ipcRenderer.invoke('fs:writeFile', filePath, content)
+  7. main.js receives IPC → ipcMain.handle('fs:writeFile', ...)
+  8. main.js calls fsPromises.writeFile(filePath, content)
+  9. File written to disk
+  10. Promise resolved, returned to renderer
+  11. Renderer marks tab as not dirty (removes dot)
+
+FLOW 2: Refactoring Code
+  1. User clicks "Refactor Code" button in Refactoring panel
+  2. Calls refactorCode() in renderer.js
+  3. Gets selected refactoring types from checkboxes
+  4. Calls api.backendRefactorReview({code, types})
+  5. IPC: ipcRenderer.invoke('backend:refactorReview', ...)
+  6. main.js receives → calls backendFetch('/refactor/review', 'POST', body)
+  7. backendFetch() makes HTTP call to http://127.0.0.1:8000/refactor/review
+  8. Python FastAPI backend receives request
+  9. Runs JavaRefactoringEngine.refactor(code, types)
+  10. Returns refactored_code, diff, metrics_before, metrics_after, session_id
+  11. HTTP response returned to backendFetch()
+  12. Promise resolved in renderer
+  13. Renderer shows diff overlay with side-by-side comparison
+  14. User clicks "Accept"
+  15. Calls api.backendRefactorDecision({session_id, action: 'accept'})
+  16. Backend returns final_code
+  17. Renderer updates tab.model with new code
+
+FLOW 3: Terminal Input/Output
+  1. User types 'ls' in terminal and presses Enter
+  2. xterm.onData fires with data = 'ls\r'
+  3. Calls api.writeTerminal(terminalId, 'ls\r')
+  4. IPC: ipcRenderer.send('terminal:write', {id, data})
+  5. main.js receives → terminal.write('ls\r')
+  6. Sends command to PTY process (running bash shell)
+  7. Shell executes 'ls' and outputs results
+  8. term.onData in main.js fires with output
+  9. main.js sends IPC: mainWindow.webContents.send('terminal:data', {id, data: output})
+  10. renderer.js api.onTerminalData fires
+  11. Calls term.write(output)
+  12. xterm displays output on screen
+  13. User sees: $ ls\r\nfile1.txt file2.txt\r\n$
+
+================================================================================
+                        3-SENTENCE SUMMARIES
+================================================================================
+
+FILE: main.js
+Purpose: Electron main process that spawns/manages Python FastAPI backend,
+handles all IPC requests from renderer (file I/O, terminal, Git operations),
+and proxies HTTP calls to backend via localhost:8000. IIFE: Entire app process
+management in one file.
+
+FILE: preload.js
+Purpose: Secure bridge using contextBridge to expose only safe API methods
+to renderer process, preventing renderer from accessing dangerous node APIs
+like require('fs') directly. Every renderer → main communication channels
+through preload exports.
+
+FILE: renderer.js
+Purpose: Main UI logic handling Monaco editor tabs, sidebar panels, real-time
+error checking, refactoring preview/accept workflow, terminal bidirectional
+wiring, and dependency graph visualization. Largest file (2500 lines) containing
+all user interaction state and complex workflows.
+
+FILE: index.html
+Purpose: HTML layout structure defining workbench (activity bar, sidebar, editor,
+panels) using semantic HTML5 with data-* attributes for JavaScript hooks. Acts
+as template that renderer.js populates with dynamic content.
+
+FILE: styles.css
+Purpose: VS Code Dark+ theme implementation with CSS variables for colors,
+flexbox-based responsive layout managing resizable sidebar/editor/panels, and
+component styling (tabs, tree items, terminal, modals). Complete visual design
+in one stylesheet.
+
+FILE: package.json
+Purpose: Node.js package manifest listing dependencies (electron, monaco-editor,
+xterm, node-pty), build configuration for electron-builder (creates Windows
+NSIS installer), and npm scripts (start, dev, dist for packaging).
+
+================================================================================
+                          FRONTEND ARCHITECTURE SUMMARY
+================================================================================
+
+The CodeNova IDE frontend follows a 5-layer architecture:
+
+LAYER 1 - SECURITY BOUNDARY (preload.js):
+- Exposes only 100+ safe API methods via contextBridge
+- Prevents renderer from accessing dangerous Node APIs
+- All IPC requests validated at entry point
+
+LAYER 2 - MAIN PROCESS (main.js):
+- Manages window lifecycle and OS integration
+- Spawns Python FastAPI backend subprocess
+- Proxies HTTP requests from renderer to backend
+- Handles file system, terminal, Git operations
+- 900 lines managing critical desktop operations
+
+LAYER 3 - RENDERER PROCESS (renderer.js):
+- React-like state management (global state object)
+- Monaco editor integration (syntax highlighting, tabs)
+- Terminal integration (xterm.js + pty bidirectional)
+- Refactoring workflows (preview, diff, accept/reject)
+- Real-time error checking with debouncing
+- 2500 lines of complex UI logic
+
+LAYER 4 - HTML/STYLING (index.html + styles.css):
+- Workbench layout: activity bar | sidebar | editor | panels
+- Flexbox responsive design (resizable sidebar)
+- VS Code Dark+ theme colors
+- Component styling (tabs, tree, terminal, modals)
+
+LAYER 5 - BACKEND API (FastAPI Python):
+- Java refactoring engine (AST analysis)
+- Real-time error detection
+- Git operations (GitPython)
+- Code metrics (Halstead, cyclomatic complexity)
+- Multi-file dependency analysis
+- AI chat endpoint (OpenAI GPT-4o-mini)
+
+DATA FLOWS:
+- User actions in renderer → IPC → main process → HTTP → FastAPI
+- File drag-drop → file explorer → renderer state update → UI re-render
+- Terminal input → xterm.js → IPC → PTY in main → shell output → IPC → xterm
+- Refactoring: user click → preview dialog → accept/reject decision → apply to editor
+
+PERFORMANCE OPTIMIZATIONS:
+- Lazy-load file tree (don't load entire project tree on startup)
+- Debounced error checking (800ms after user stops typing)
+- Debounced graph updates (update on tab switch, not every keystroke)
+- Terminal FitAddon auto-resize (ResizeObserver, not manual)
+- Monaco DiffEditor disposed and recreated (prevent memory leaks)
+
+SECURITY:
+- Context isolation: renderer can't access Main process context
+- Process sandboxing: renderer can't require('fs') directly
+- IPC whitelisting: only exposed API available to renderer
+- Content Security Policy: restrict external requests
+- JAVA_HOME detection: prevent RCE via malicious Java version
+
+================================================================================
+                            END OF ANALYSIS
+================================================================================
+
+For Viva/Interview Preparation:
+
+KEY TALKING POINTS:
+1. "Main process spawns FastAPI backend as subprocess - Python runs inside Electron"
+2. "preload.js acts as security boundary - uses contextBridge to expose safe API"
+3. "renderer.js has 2500 lines managing Monaco editor, tabs, terminal, refactoring"
+4. "Debounced error checking - 800ms prevents each keystroke from triggering analysis"
+5. "Terminal uses xterm.js frontend + node-pty backend for bidirectional communication"
+6. "Diff preview uses Monaco DiffEditor - side-by-side original vs refactored"
+7. "All IPC calls proxied through backendFetch() - HTTP to FastAPI backend"
+8. "Lazy-load file tree - only expand folders on user click, not upfront load"
+9. "VS Code Dark+ theme using CSS variables - consistent with code editor colors"
+10. "State management: single global state object tracks tabs, panels, editor, terminal"
+
+DEMO FLOW FOR TEACHER:
+1. Open folder → file tree renders recursively
+2. Click file → creates tab, Monaco loads with syntax highlighting
+3. Type code → status bar updates line/col, debouncer schedules error check after 800ms
+4. Press F5 → run file compiles Java and shows output in terminal
+5. Click Refactor → sends code to FastAPI, shows diff preview
+6. Click Accept → applies refactored code to tab, saves history
+7. View terminal → bidirectional input/output between xterm and PTY shell
+
+All 5 files work in concert through IPC channels to create the complete IDE experience.
+
+================================================================================

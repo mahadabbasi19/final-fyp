@@ -14,6 +14,10 @@ CODE_DOCUMENTATION_FOR_VIVA.md
 .vscode/
 .idea/
 
+# Node
+node_modules/
+dist/
+
 # Misc
 *.log
 *.tmp

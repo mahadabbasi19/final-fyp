@@ -2,10 +2,10 @@
 # A comprehensive Python-based tool for refactoring Java code using AST parsing
 # Includes real-time error detection similar to IntelliJ/Eclipse
 
-__version__ = "1.1.0"
+__version__ = "2.0.0"
 __author__ = "Java Refactoring Engine Team"
 
-from .error_checker import (
+from error_checker import (
     ErrorChecker,
     JavaError,
     ErrorType,
@@ -15,17 +15,26 @@ from .error_checker import (
     StaticAnalyzer
 )
 
-from .metrics import (
+from metrics import (
     MetricsCollector,
     MetricsVisualizer,
     VisualizationData,
-    CouplingCohesionCalculator  # NEW: Coupling & Cohesion metrics
+    CouplingCohesionCalculator,
+    HalsteadCalculator,
+    MaintainabilityIndexCalculator,
+    CodeHealthDashboard,
 )
 
-from .refactoring_engine import (
+from refactoring_engine import (
     JavaRefactoringEngine,
     BehaviorDecomposer,
-    StructureChanger,  # NEW: Change Structure refactoring
+    StructureChanger,
     StructuralRefactoringResult,
-    NewClassDefinition
+    NewClassDefinition,
+    BehaviorPreservationProtocol,
+    VariableScopeAnalyzer,
+    DeadCodeEliminator,
+    UnusedImportRemover,
+    ConditionSimplifier,
+    LoopOptimizer,
 )

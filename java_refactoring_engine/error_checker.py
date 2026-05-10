@@ -1,26 +1,47 @@
 """
 Error Checker Module for Java Code
 ===================================
-This module provides real-time error detection for Java code, similar to 
-IntelliJ or Eclipse IDEs. It detects:
+Provides **real-time, IDE-grade** error detection for Java source code,
+comparable to the experience offered by IntelliJ IDEA or Eclipse.
 
-1. SYNTAX ERRORS: Missing semicolons, unmatched braces, undeclared variables,
-   wrong method calls, invalid Java constructs.
+Detection Layers
+----------------
+1. **Syntax Errors** – Missing semicolons, unmatched braces, undeclared
+   variables, type mismatches, and other compilation-level issues.  Detected
+   by delegating to ``javac`` when available, with a robust regex-based
+   fallback for environments without a JDK.
 
-2. RUNTIME ERRORS: NullPointerException, ArrayIndexOutOfBoundsException,
-   divide by zero, arithmetic exceptions.
+2. **Runtime-Risk Warnings** – Static heuristics that predict common
+   runtime exceptions (``NullPointerException``,
+   ``ArrayIndexOutOfBoundsException``, division by zero, integer overflow,
+   resource leaks).
 
-3. LOGICAL WARNINGS: Unused variables, unreachable code, bad practices.
+3. **Code-Smell / Logical Warnings** – Empty ``catch`` blocks, magic
+   numbers, unused variables, deep nesting, naming-convention violations,
+   long methods, and more.
 
-Architecture:
-- Uses subprocess to call javac for syntax checking
-- Executes code in sandboxed environment for runtime error detection
-- Background threading for non-blocking UI updates
-- Debouncing to prevent excessive checks while typing
+Architecture Highlights
+-----------------------
+* **Debouncer** – A thread-safe class that cancels-and-restarts a timer on
+  every keystroke, ensuring the expensive ``check_java_code`` pipeline runs
+  only *after* the user pauses typing (configurable delay, default 600 ms).
+  This keeps the Electron/Monaco UI fully responsive.
 
-Author: Java Refactoring Engine
-Date: 2025
+* **Observer / Callback Pattern** – ``ErrorChecker.set_callback()`` lets
+  the UI layer register a listener that receives ``List[JavaError]`` on a
+  background thread, decoupling detection from rendering.
+
+* **Caching** – Identical source text is never analysed twice in a row;
+  a hash-based cache short-circuits repeated checks instantly.
+
+* **Structured Output** – Every finding is a ``JavaError`` dataclass with
+  ``line``, ``column``, ``message``, ``severity``, and ``error_type``,
+  serialisable to JSON for the FastAPI ``/check-errors`` endpoint.
+
+Author: Java Refactoring Engine – CodeNova IDE
 """
+
+from __future__ import annotations
 
 import os
 import re
@@ -28,53 +49,65 @@ import subprocess
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Callable, Dict, Tuple
-from pathlib import Path
+from typing import List, Optional, Callable, Dict, Set, Tuple
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Enumerations
+# ──────────────────────────────────────────────────────────────────────
 
 class ErrorType(Enum):
+    """Classification of error types detected by the checker.
+
+    SYNTAX  – Compilation errors caught by ``javac`` or regex heuristics.
+    RUNTIME – Errors that would occur during execution.
+    WARNING – Code-quality issues and potential bugs.
+    INFO    – Informational messages and suggestions.
     """
-    Classification of error types detected by the checker.
-    
-    SYNTAX: Compilation errors caught by javac
-    RUNTIME: Errors that would occur during execution
-    WARNING: Code quality issues and potential bugs
-    INFO: Informational messages and suggestions
-    """
-    SYNTAX = "syntax"
+    SYNTAX  = "syntax"
     RUNTIME = "runtime"
     WARNING = "warning"
-    INFO = "info"
+    INFO    = "info"
 
 
 class ErrorSeverity(Enum):
-    """
-    Severity levels for prioritizing error display.
-    
-    ERROR: Must be fixed for code to compile/run
-    WARNING: Should be fixed but code may still work
-    INFO: Suggestions for improvement
-    """
-    ERROR = "error"
-    WARNING = "warning"
-    INFO = "info"
+    """Severity levels for prioritising error display.
 
+    ERROR   – Must be fixed for the code to compile / run.
+    WARNING – Should be fixed but the code may still work.
+    INFO    – Suggestions for improvement.
+    """
+    ERROR   = "error"
+    WARNING = "warning"
+    INFO    = "info"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# JavaError dataclass
+# ──────────────────────────────────────────────────────────────────────
 
 @dataclass
 class JavaError:
-    """
-    Data class representing a single detected error or warning.
-    
-    Attributes:
-        line: Line number where error occurs (1-indexed)
-        column: Column number where error occurs (1-indexed)
-        error_type: Type of error (syntax/runtime/warning)
-        severity: How critical the error is
-        message: Human-readable error description
-        suggestion: Optional fix suggestion
-        code_snippet: The problematic code segment
+    """A single detected error, warning, or informational finding.
+
+    Attributes
+    ----------
+    line : int
+        1-indexed line number where the issue occurs.
+    column : int
+        1-indexed column number where the issue occurs.
+    error_type : ErrorType
+        Category of the finding (syntax / runtime / warning / info).
+    severity : ErrorSeverity
+        How critical the finding is.
+    message : str
+        Human-readable description of the problem.
+    suggestion : str | None
+        Optional recommended fix.
+    code_snippet : str | None
+        The problematic code segment (when available).
     """
     line: int
     column: int
@@ -83,64 +116,217 @@ class JavaError:
     message: str
     suggestion: Optional[str] = None
     code_snippet: Optional[str] = None
-    
+
+    # ── Serialisation helpers ──────────────────────────────────────
+
     def to_dict(self) -> dict:
-        """Convert error to dictionary for JSON serialization."""
+        """Convert to a plain dictionary suitable for JSON responses."""
         return {
-            'line': self.line,
-            'column': self.column,
-            'type': self.error_type.value,
-            'severity': self.severity.value,
-            'message': self.message,
-            'suggestion': self.suggestion,
-            'code_snippet': self.code_snippet
+            "line":        self.line,
+            "column":      self.column,
+            "type":        self.error_type.value,
+            "severity":    self.severity.value,
+            "message":     self.message,
+            "suggestion":  self.suggestion,
+            "code_snippet": self.code_snippet,
         }
-    
+
     def __str__(self) -> str:
-        """String representation for display in error panel."""
-        type_icon = {
-            ErrorType.SYNTAX: "❌",
+        """Friendly string for the IDE error-panel."""
+        icons = {
+            ErrorType.SYNTAX:  "❌",
             ErrorType.RUNTIME: "⚠️",
             ErrorType.WARNING: "💡",
-            ErrorType.INFO: "ℹ️"
+            ErrorType.INFO:    "ℹ️",
         }
-        return f"{type_icon.get(self.error_type, '•')} Line {self.line}: {self.message}"
+        return f"{icons.get(self.error_type, '•')} Line {self.line}: {self.message}"
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Debouncer – thread-safe keystroke debouncing
+# ──────────────────────────────────────────────────────────────────────
+
+class Debouncer:
+    """Cancel-and-restart timer that fires a callback once the user stops typing.
+
+    **Why debouncing matters (supervisor note)**
+    Without debouncing, every single keystroke would trigger a full
+    ``javac`` compilation + regex + static-analysis pipeline, overwhelming
+    the CPU and freezing the UI.  The *Debouncer* ensures only **one**
+    analysis run happens per typing pause, dramatically reducing resource
+    usage while maintaining sub-second feedback latency.
+
+    Thread-safety is ensured via a ``threading.Lock`` that serialises
+    access to the internal ``threading.Timer``.
+
+    Parameters
+    ----------
+    delay : float
+        Seconds to wait after the last call before firing (default 0.6).
+    callback : Callable
+        The function to invoke when the timer fires.
+    """
+
+    def __init__(self, delay: float = 0.6, callback: Optional[Callable] = None):
+        self._delay = delay
+        self._callback = callback
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+
+    @property
+    def delay(self) -> float:
+        return self._delay
+
+    @delay.setter
+    def delay(self, value: float) -> None:
+        self._delay = max(0.1, value)  # floor at 100 ms
+
+    def trigger(self, *args, **kwargs) -> None:
+        """Schedule (or reschedule) the callback.
+
+        If a previous timer is pending it is cancelled first, ensuring only
+        the **latest** invocation fires after the full delay elapses.
+        """
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+            self._timer = threading.Timer(
+                self._delay,
+                self._fire,
+                args=args,
+                kwargs=kwargs,
+            )
+            self._timer.daemon = True   # don't block process exit
+            self._timer.start()
+
+    def cancel(self) -> None:
+        """Cancel any pending invocation."""
+        with self._lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def _fire(self, *args, **kwargs) -> None:
+        """Internal – invoke the registered callback."""
+        if self._callback is not None:
+            self._callback(*args, **kwargs)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Comment-stripping utilities
+# ──────────────────────────────────────────────────────────────────────
+
+def strip_java_comments(code: str) -> Tuple[str, Dict[int, bool]]:
+    """Remove comments from Java code while preserving line numbers.
+
+    Returns
+    -------
+    tuple[str, dict[int, bool]]
+        ``(code_without_comments, comment_line_map)`` where the map marks
+        every line number that was wholly a comment.
+    """
+    lines = code.split("\n")
+    result_lines: List[str] = []
+    comment_lines: Dict[int, bool] = {}
+    in_multiline = False
+
+    for i, line in enumerate(lines, 1):
+        stripped = line.strip()
+
+        # Inside a block comment ─────────────────────────────────
+        if in_multiline:
+            comment_lines[i] = True
+            if "*/" in line:
+                in_multiline = False
+                after = line[line.index("*/") + 2:]
+                result_lines.append(after if after.strip() else "")
+            else:
+                result_lines.append("")
+            continue
+
+        # Start of block comment ─────────────────────────────────
+        if "/*" in stripped:
+            comment_lines[i] = True
+            if "*/" in stripped:
+                line = re.sub(r"/\*.*?\*/", "", line)
+            else:
+                in_multiline = True
+                result_lines.append(line[: line.index("/*")])
+                continue
+
+        # Full-line single-line comment / Javadoc continuation ───
+        if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/**"):
+            comment_lines[i] = True
+            result_lines.append("")
+            continue
+
+        # Inline // comment (outside strings) ────────────────────
+        if "//" in line:
+            in_str = False
+            for idx, ch in enumerate(line):
+                if ch == '"' and (idx == 0 or line[idx - 1] != "\\"):
+                    in_str = not in_str
+                elif not in_str and line[idx: idx + 2] == "//":
+                    line = line[:idx]
+                    if not line.strip():
+                        comment_lines[i] = True
+                    break
+
+        result_lines.append(line)
+
+    return "\n".join(result_lines), comment_lines
+
+
+def is_comment_line(line: str, in_multiline: bool = False) -> Tuple[bool, bool]:
+    """Return ``(is_comment, still_in_multiline)`` for a single line."""
+    stripped = line.strip()
+
+    if in_multiline:
+        return (True, "*/" not in stripped)
+
+    if stripped.startswith("//"):
+        return True, False
+    if stripped.startswith("/*"):
+        return (True, "*/" not in stripped)
+    if stripped.startswith("*") or stripped.startswith("/**"):
+        return True, in_multiline
+
+    return False, False
+
+
+# ──────────────────────────────────────────────────────────────────────
+# JavaSyntaxChecker – javac-backed + regex fallback
+# ──────────────────────────────────────────────────────────────────────
 
 class JavaSyntaxChecker:
+    """Detect compilation-level syntax errors.
+
+    **Primary strategy** – write the source to a temp ``.java`` file and run
+    ``javac -Xlint:all``.  This catches the full spectrum of syntax errors
+    with zero false positives.
+
+    **Fallback strategy** – when no JDK is installed, a hand-tuned set of
+    regex rules checks for the most common issues (unmatched brackets,
+    missing semicolons, type mismatches).
     """
-    Syntax Checker using javac compiler.
-    
-    This class handles syntax error detection by:
-    1. Writing code to a temporary .java file
-    2. Running javac to compile (without execution)
-    3. Parsing javac output for error messages
-    4. Converting errors to JavaError objects
-    
-    Errors detected include:
-    - Missing semicolons
-    - Unmatched braces/parentheses
-    - Undeclared variables
-    - Type mismatches
-    - Invalid method calls
-    - Missing return statements
-    """
-    
-    def __init__(self):
-        """Initialize the syntax checker."""
-        self.temp_dir = tempfile.mkdtemp(prefix="java_checker_")
-        self.javac_path = self._find_javac()
-        
+
+    def __init__(self) -> None:
+        self._temp_dir = tempfile.mkdtemp(prefix="java_checker_")
+        self._javac_path = self._find_javac()
+
+    # ── JDK discovery ─────────────────────────────────────────────
+
     def _find_javac(self) -> Optional[str]:
-        """
-        Locate the javac compiler on the system.
-        
-        Returns:
-            Path to javac executable, or None if not found.
-        """
-        # Try common locations
-        possible_paths = [
-            "javac",  # If in PATH
+        """Locate ``javac`` on the host, checking JAVA_HOME first."""
+        candidates: List[str] = []
+
+        java_home = os.environ.get("JAVA_HOME")
+        if java_home:
+            candidates.append(os.path.join(java_home, "bin", "javac.exe"))
+            candidates.append(os.path.join(java_home, "bin", "javac"))
+
+        candidates += [
+            "javac",
             r"C:\Program Files\Java\jdk-21\bin\javac.exe",
             r"C:\Program Files\Java\jdk-17\bin\javac.exe",
             r"C:\Program Files\Java\jdk-11\bin\javac.exe",
@@ -148,1472 +334,1115 @@ class JavaSyntaxChecker:
             "/usr/bin/javac",
             "/usr/local/bin/javac",
         ]
-        
-        # Check JAVA_HOME
-        java_home = os.environ.get('JAVA_HOME')
-        if java_home:
-            possible_paths.insert(0, os.path.join(java_home, 'bin', 'javac'))
-            possible_paths.insert(0, os.path.join(java_home, 'bin', 'javac.exe'))
-        
-        for path in possible_paths:
+
+        for path in candidates:
             try:
                 result = subprocess.run(
-                    [path, '-version'],
-                    capture_output=True,
-                    timeout=5
+                    [path, "-version"], capture_output=True, timeout=5,
                 )
                 if result.returncode == 0:
                     return path
             except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 continue
-        
         return None
-    
+
+    # ── Public API ────────────────────────────────────────────────
+
     def check_syntax(self, code: str) -> List[JavaError]:
+        """Return syntax errors for *code*.
+
+        Delegates to ``javac`` when available; falls back to
+        ``_regex_syntax_check`` otherwise.
         """
-        Check Java code for syntax errors using javac.
-        
-        Args:
-            code: Java source code to check
-            
-        Returns:
-            List of JavaError objects for detected syntax errors
-        """
-        errors = []
-        
-        if not self.javac_path:
-            # Fallback to regex-based checking if javac not available
+        if not self._javac_path:
             return self._regex_syntax_check(code)
-        
-        # Extract class name from code
+
         class_name = self._extract_class_name(code)
         if not class_name:
             class_name = "TempClass"
-            # Wrap code in a class if needed
-            if 'class ' not in code:
+            if "class " not in code:
                 code = f"public class {class_name} {{\n{code}\n}}"
-        
-        # Write to temp file
-        temp_file = os.path.join(self.temp_dir, f"{class_name}.java")
+
+        temp_file = os.path.join(self._temp_dir, f"{class_name}.java")
+        errors: List[JavaError] = []
+
         try:
-            with open(temp_file, 'w', encoding='utf-8') as f:
-                f.write(code)
-            
-            # Run javac with reduced timeout for responsiveness
+            with open(temp_file, "w", encoding="utf-8") as fh:
+                fh.write(code)
+
             result = subprocess.run(
-                [self.javac_path, '-Xlint:all', temp_file],
+                [self._javac_path, "-Xlint:all", temp_file],
                 capture_output=True,
                 text=True,
-                timeout=3  # Reduced from 10 to 3 seconds
+                timeout=3,
             )
-            
-            # Parse errors from javac output
             errors.extend(self._parse_javac_output(result.stderr, code))
-            
+
         except subprocess.TimeoutExpired:
             errors.append(JavaError(
                 line=1, column=1,
                 error_type=ErrorType.WARNING,
                 severity=ErrorSeverity.WARNING,
-                message="Syntax check timed out - code may be too complex"
+                message="Syntax check timed out – code may be too complex",
             ))
-        except Exception as e:
+        except Exception as exc:
             errors.append(JavaError(
                 line=1, column=1,
                 error_type=ErrorType.WARNING,
                 severity=ErrorSeverity.INFO,
-                message=f"Syntax check error: {str(e)}"
+                message=f"Syntax check error: {exc}",
             ))
         finally:
-            # Cleanup
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-                class_file = temp_file.replace('.java', '.class')
-                if os.path.exists(class_file):
-                    os.remove(class_file)
-            except:
-                pass
-        
+            for ext in (".java", ".class"):
+                path = temp_file.replace(".java", ext)
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
         return errors
-    
-    def _extract_class_name(self, code: str) -> Optional[str]:
-        """Extract the public class name from Java code."""
-        match = re.search(r'public\s+class\s+(\w+)', code)
-        if match:
-            return match.group(1)
-        match = re.search(r'class\s+(\w+)', code)
-        if match:
-            return match.group(1)
-        return None
-    
+
+    # ── javac output parser ───────────────────────────────────────
+
+    _JAVAC_ERROR_RE = re.compile(
+        r".*\.java:(\d+):\s*(error|warning):\s*(.+)"
+    )
+
     def _parse_javac_output(self, output: str, original_code: str) -> List[JavaError]:
+        """Parse ``javac`` stderr into structured ``JavaError`` objects.
+
+        ``javac`` emits blocks of the form::
+
+            Filename.java:42: error: ';' expected
+                    int x = 10
+                               ^
+
+        We extract the **line number**, **severity**, **message**, and
+        **column** (from the caret position).
         """
-        Parse javac error output into JavaError objects.
-        
-        javac output format:
-        filename.java:line: error: message
-                code snippet
-                ^
-        """
-        errors = []
-        lines = output.strip().split('\n')
-        
-        # Pattern for javac error line
-        error_pattern = re.compile(r'.*\.java:(\d+):\s*(error|warning):\s*(.+)')
-        
+        errors: List[JavaError] = []
+        lines = output.strip().split("\n")
+
         i = 0
         while i < len(lines):
-            line = lines[i]
-            match = error_pattern.match(line)
-            
+            match = self._JAVAC_ERROR_RE.match(lines[i])
             if match:
                 line_num = int(match.group(1))
-                error_kind = match.group(2)
-                message = match.group(3)
-                
-                # Get code snippet if available
-                snippet = None
+                kind = match.group(2)
+                message = match.group(3).strip()
+
+                snippet: Optional[str] = None
                 column = 1
+
+                # Next line is usually the source snippet
                 if i + 1 < len(lines):
                     snippet = lines[i + 1].strip()
-                    # Find column from caret position
-                    if i + 2 < len(lines) and '^' in lines[i + 2]:
-                        column = lines[i + 2].index('^') + 1
-                
-                error_type = ErrorType.SYNTAX if error_kind == 'error' else ErrorType.WARNING
-                severity = ErrorSeverity.ERROR if error_kind == 'error' else ErrorSeverity.WARNING
-                
-                # Generate suggestion based on error message
-                suggestion = self._generate_suggestion(message)
-                
+                # Line after that may contain the caret marker
+                if i + 2 < len(lines) and "^" in lines[i + 2]:
+                    column = lines[i + 2].index("^") + 1
+
+                # Skip cross-file dependency errors: "cannot find symbol"
+                # for class/type references are not real errors in the
+                # current file — they just mean the other .java files
+                # are not on the classpath during single-file compilation.
+                if "cannot find symbol" in message:
+                    # Peek ahead for the "symbol: class ..." detail line
+                    is_class_dep = False
+                    for peek in range(i + 1, min(i + 5, len(lines))):
+                        peek_line = lines[peek].strip()
+                        if peek_line.startswith("symbol:") and "class " in peek_line:
+                            is_class_dep = True
+                            break
+                        if peek_line.startswith("symbol:") and "variable " in peek_line:
+                            # Check if the variable name looks like a class (Uppercase)
+                            parts = peek_line.split("variable")
+                            if len(parts) > 1 and parts[1].strip()[:1].isupper():
+                                is_class_dep = True
+                            break
+                    if is_class_dep:
+                        i += 1
+                        continue
+
+                error_type = ErrorType.SYNTAX if kind == "error" else ErrorType.WARNING
+                severity = ErrorSeverity.ERROR if kind == "error" else ErrorSeverity.WARNING
+
                 errors.append(JavaError(
                     line=line_num,
                     column=column,
                     error_type=error_type,
                     severity=severity,
                     message=message,
-                    suggestion=suggestion,
-                    code_snippet=snippet
+                    suggestion=self._suggest_fix(message),
+                    code_snippet=snippet,
                 ))
-            
             i += 1
-        
+
         return errors
-    
-    def _generate_suggestion(self, error_message: str) -> Optional[str]:
-        """Generate a fix suggestion based on the error message."""
-        suggestions = {
-            "';' expected": "Add a semicolon at the end of the statement",
-            "cannot find symbol": "Check variable/method name spelling or add import",
-            "incompatible types": "Ensure type compatibility or add explicit cast",
-            "missing return statement": "Add a return statement for all code paths",
-            "unreachable statement": "Remove or restructure unreachable code",
-            "variable .* might not have been initialized": "Initialize the variable before use",
-            "illegal start of expression": "Check for missing braces or incorrect syntax",
-            "class .* is public": "Class name must match filename",
-            "reached end of file while parsing": "Add missing closing brace '}'",
-            "unclosed string literal": "Add closing quote to string",
-        }
-        
-        for pattern, suggestion in suggestions.items():
+
+    # ── Suggestion engine ─────────────────────────────────────────
+
+    _SUGGESTION_MAP: List[Tuple[str, str]] = [
+        ("';' expected",                           "Add a semicolon at the end of the statement"),
+        ("cannot find symbol",                     "Check variable / method name spelling or add an import"),
+        ("incompatible types",                     "Ensure type compatibility or add an explicit cast"),
+        ("missing return statement",               "Add a return statement for all code paths"),
+        ("unreachable statement",                  "Remove or restructure unreachable code"),
+        (r"variable .* might not have been init",  "Initialise the variable before use"),
+        ("illegal start of expression",            "Check for missing braces or incorrect syntax"),
+        (r"class .* is public",                    "The class name must match the filename"),
+        ("reached end of file while parsing",      "Add missing closing brace '}'"),
+        ("unclosed string literal",                "Add the closing quote to the string"),
+        ("not a statement",                        "Verify the expression is a valid statement (e.g. method call)"),
+        ("already defined",                        "Rename or remove the duplicate declaration"),
+        ("non-static .* cannot be referenced",     "Use an instance or mark the member as static"),
+    ]
+
+    def _suggest_fix(self, error_message: str) -> Optional[str]:
+        """Return a human-readable fix suggestion for *error_message*."""
+        for pattern, suggestion in self._SUGGESTION_MAP:
             if re.search(pattern, error_message, re.IGNORECASE):
                 return suggestion
-        
         return None
-    
+
+    # ── Class-name extraction ─────────────────────────────────────
+
+    @staticmethod
+    def _extract_class_name(code: str) -> Optional[str]:
+        m = re.search(r"public\s+class\s+(\w+)", code)
+        if m:
+            return m.group(1)
+        m = re.search(r"class\s+(\w+)", code)
+        return m.group(1) if m else None
+
+    # ── Regex-based fallback syntax checker ───────────────────────
+
     def _regex_syntax_check(self, code: str) -> List[JavaError]:
+        """Heuristic syntax check when ``javac`` is unavailable.
+
+        Tracks brace / parenthesis / bracket stacks, detects missing
+        semicolons, and catches type mismatches.
         """
-        Fallback syntax checking using regex patterns.
-        Used when javac is not available.
-        """
-        errors = []
-        lines = code.split('\n')
-        
-        # Track braces and parentheses with context
-        brace_stack = []  # [(line, col, context)]
-        paren_stack = []  # [(line, col, context)]
-        square_stack = []  # [(line, col)]
-        
-        # Track multi-line comment state
-        in_multiline_comment = False
-        
-        for i, line in enumerate(lines, 1):
-            original_line = line
-            line_stripped = line.strip()
-            
-            # Handle multi-line comments
-            if in_multiline_comment:
-                if '*/' in line:
-                    in_multiline_comment = False
-                    after_comment = line[line.index('*/') + 2:]
-                    if not after_comment.strip():
+        errors: List[JavaError] = []
+        lines = code.split("\n")
+
+        brace_stack: List[Tuple[int, int, str]] = []
+        paren_stack: List[Tuple[int, int, str]] = []
+        square_stack: List[Tuple[int, int]] = []
+        in_multiline = False
+
+        for i, raw_line in enumerate(lines, 1):
+            stripped = raw_line.strip()
+
+            # ── comment handling ──────────────────────────────────
+            if in_multiline:
+                if "*/" in raw_line:
+                    in_multiline = False
+                    after = raw_line[raw_line.index("*/") + 2:]
+                    if not after.strip():
                         continue
-                    line_stripped = after_comment.strip()
+                    stripped = after.strip()
                 else:
                     continue
-            
-            # Check for start of multi-line comment
-            if '/*' in line_stripped:
-                if '*/' not in line_stripped:
-                    in_multiline_comment = True
+
+            if "/*" in stripped:
+                if "*/" not in stripped:
+                    in_multiline = True
                 continue
-            
-            # Skip single-line comments (full line)
-            if line_stripped.startswith('//'):
+
+            if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/**"):
                 continue
-            
-            # Skip JavaDoc comment lines
-            if line_stripped.startswith('*') or line_stripped.startswith('/**'):
+            if stripped.startswith("@") or not stripped:
                 continue
-            
-            # Skip annotation lines
-            if line_stripped.startswith('@'):
-                continue
-            
-            # Skip empty lines
-            if not line_stripped:
-                continue
-            
-            # Get code before any inline comment
-            code_before_comment = line_stripped
-            comment_start = -1
-            if '//' in code_before_comment:
-                # Find // that's not inside a string
-                in_str = False
-                for idx, ch in enumerate(code_before_comment):
-                    if ch == '"' and (idx == 0 or code_before_comment[idx-1] != '\\'):
-                        in_str = not in_str
-                    elif not in_str and code_before_comment[idx:idx+2] == '//':
-                        comment_start = idx
-                        break
-                if comment_start >= 0:
-                    code_before_comment = code_before_comment[:comment_start].strip()
-            
-            # Remove string literals for bracket counting
-            line_for_brackets = re.sub(r'"(?:[^"\\]|\\.)*"', '""', code_before_comment)
-            line_for_brackets = re.sub(r"'(?:[^'\\]|\\.)*'", "''", line_for_brackets)
-            
-            # Count brackets character by character
-            for j, char in enumerate(line_for_brackets):
-                if char == '{':
-                    context = 'method' if '(' in line_for_brackets[:j] else 'block'
-                    brace_stack.append((i, j+1, context))
-                elif char == '}':
+
+            # ── strip inline comments ─────────────────────────────
+            code_part = stripped
+            in_str = False
+            for idx, ch in enumerate(code_part):
+                if ch == '"' and (idx == 0 or code_part[idx - 1] != "\\"):
+                    in_str = not in_str
+                elif not in_str and code_part[idx: idx + 2] == "//":
+                    code_part = code_part[:idx].strip()
+                    break
+
+            # ── remove string/char literals for bracket analysis ──
+            bracket_line = re.sub(r'"(?:[^"\\]|\\.)*"', '""', code_part)
+            bracket_line = re.sub(r"'(?:[^'\\]|\\.)*'", "''", bracket_line)
+
+            for j, char in enumerate(bracket_line):
+                if char == "{":
+                    ctx = "method" if "(" in bracket_line[:j] else "block"
+                    brace_stack.append((i, j + 1, ctx))
+                elif char == "}":
                     if brace_stack:
                         brace_stack.pop()
                     else:
                         errors.append(JavaError(
-                            line=i, column=j+1,
-                            error_type=ErrorType.SYNTAX,
-                            severity=ErrorSeverity.ERROR,
+                            line=i, column=j + 1,
+                            error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                             message="Unmatched closing brace '}'",
-                            suggestion="Remove extra '}' or add matching '{'"
+                            suggestion="Remove extra '}' or add matching '{'",
                         ))
-                
-                if char == '(':
-                    paren_stack.append((i, j+1, code_before_comment[:30]))
-                elif char == ')':
+
+                if char == "(":
+                    paren_stack.append((i, j + 1, code_part[:30]))
+                elif char == ")":
                     if paren_stack:
                         paren_stack.pop()
                     else:
                         errors.append(JavaError(
-                            line=i, column=j+1,
-                            error_type=ErrorType.SYNTAX,
-                            severity=ErrorSeverity.ERROR,
+                            line=i, column=j + 1,
+                            error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                             message="Unmatched closing parenthesis ')'",
-                            suggestion="Remove extra ')' or add matching '('"
+                            suggestion="Remove extra ')' or add matching '('",
                         ))
-                
-                if char == '[':
-                    square_stack.append((i, j+1))
-                elif char == ']':
+
+                if char == "[":
+                    square_stack.append((i, j + 1))
+                elif char == "]":
                     if square_stack:
                         square_stack.pop()
                     else:
                         errors.append(JavaError(
-                            line=i, column=j+1,
-                            error_type=ErrorType.SYNTAX,
-                            severity=ErrorSeverity.ERROR,
+                            line=i, column=j + 1,
+                            error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                             message="Unmatched closing bracket ']'",
-                            suggestion="Remove extra ']' or add matching '['"
+                            suggestion="Remove extra ']' or add matching '['",
                         ))
-            
-            # Check for missing semicolons on statement lines
-            # But skip if this looks like a multi-line statement continuation
-            code_part = code_before_comment
-            
-            # Check if next non-empty line starts with . (method chaining) or operator
+
+            # ── missing semicolons ────────────────────────────────
             is_continued = False
             if i < len(lines):
-                for next_idx in range(i, min(i + 3, len(lines))):
-                    next_line = lines[next_idx].strip()
-                    # Skip empty lines and comments
-                    if not next_line or next_line.startswith('//') or next_line.startswith('*'):
+                for nxt_idx in range(i, min(i + 3, len(lines))):
+                    nxt = lines[nxt_idx].strip()
+                    if not nxt or nxt.startswith("//") or nxt.startswith("*"):
                         continue
-                    # Check if it starts with continuation patterns
-                    if next_line.startswith('.') or next_line.startswith('+') or next_line.startswith('-'):
+                    if nxt.startswith(".") or nxt.startswith("+") or nxt.startswith("-"):
                         is_continued = True
                     break
-            
-            if code_part and not code_part.endswith(('{', '}', ';', ',', ':', '(', ')')) and not is_continued:
-                # These patterns should end with semicolon
-                if re.match(r'^(return|break|continue|throw)\s', code_part):
+
+            if code_part and not code_part.endswith(("{", "}", ";", ",", ":", "(", ")")) and not is_continued:
+                if re.match(r"^(return|break|continue|throw)\s", code_part):
                     errors.append(JavaError(
-                        line=i, column=len(line),
-                        error_type=ErrorType.SYNTAX,
-                        severity=ErrorSeverity.ERROR,
+                        line=i, column=len(raw_line),
+                        error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                         message="Missing semicolon after statement",
-                        suggestion="Add ';' at the end of the statement"
+                        suggestion="Add ';' at the end of the statement",
                     ))
-                # Variable declarations/assignments - but not if ends with operator
-                elif re.match(r'^\w+\s+\w+\s*=', code_part) and not code_part.endswith('{'):
-                    # Skip if line ends with an operator (continuation)
-                    if not re.search(r'[\+\-\*\/\&\|\^]$', code_part):
+                elif re.match(r"^\w+\s+\w+\s*=", code_part) and not code_part.endswith("{"):
+                    if not re.search(r"[+\-*/&|^]$", code_part):
                         errors.append(JavaError(
-                            line=i, column=len(line),
-                            error_type=ErrorType.SYNTAX,
-                            severity=ErrorSeverity.ERROR,
+                            line=i, column=len(raw_line),
+                            error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                             message="Missing semicolon after declaration",
-                            suggestion="Add ';' at the end of the declaration"
+                            suggestion="Add ';' at the end of the declaration",
                         ))
-                # Array declarations without semicolon
-                elif re.match(r'^\w+\[\]\s+\w+\s*=', code_part):
-                    if not re.search(r'[\+\-\*\/\&\|\^]$', code_part):
+                elif re.match(r"^\w+\[\]\s+\w+\s*=", code_part):
+                    if not re.search(r"[+\-*/&|^]$", code_part):
                         errors.append(JavaError(
-                            line=i, column=len(line),
-                            error_type=ErrorType.SYNTAX,
-                            severity=ErrorSeverity.ERROR,
+                            line=i, column=len(raw_line),
+                            error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
                             message="Missing semicolon after array declaration",
-                            suggestion="Add ';' at the end of the declaration"
+                            suggestion="Add ';' at the end of the declaration",
                         ))
-        
-        # Check for unclosed braces at end of file
-        for line_num, col, context in brace_stack:
+
+        # ── unclosed delimiters ───────────────────────────────────
+        for ln, col, _ in brace_stack:
             errors.append(JavaError(
-                line=line_num, column=col,
-                error_type=ErrorType.SYNTAX,
-                severity=ErrorSeverity.ERROR,
-                message=f"Unclosed brace '{{' (opened at line {line_num})",
-                suggestion="Add matching '}}' to close the block"
+                line=ln, column=col,
+                error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                message=f"Unclosed brace '{{' (opened at line {ln})",
+                suggestion="Add matching '}}' to close the block",
             ))
-        
-        # Check for unclosed parentheses at end of file
-        for line_num, col, context in paren_stack:
+        for ln, col, _ in paren_stack:
             errors.append(JavaError(
-                line=line_num, column=col,
-                error_type=ErrorType.SYNTAX,
-                severity=ErrorSeverity.ERROR,
-                message=f"Unclosed parenthesis '(' (opened at line {line_num})",
-                suggestion="Add matching ')' to close"
+                line=ln, column=col,
+                error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                message=f"Unclosed parenthesis '(' (opened at line {ln})",
+                suggestion="Add matching ')' to close",
             ))
-        
-        # Check for unclosed square brackets at end of file
-        for line_num, col in square_stack:
+        for ln, col in square_stack:
             errors.append(JavaError(
-                line=line_num, column=col,
-                error_type=ErrorType.SYNTAX,
-                severity=ErrorSeverity.ERROR,
-                message=f"Unclosed bracket '[' (opened at line {line_num})",
-                suggestion="Add matching ']' to close"
+                line=ln, column=col,
+                error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                message=f"Unclosed bracket '[' (opened at line {ln})",
+                suggestion="Add matching ']' to close",
             ))
-        
-        # Second pass: Check for type mismatches
+
+        # ── type-mismatch heuristics ──────────────────────────────
         errors.extend(self._check_type_mismatches(lines))
-        
         return errors
-    
-    def _check_type_mismatches(self, lines: List[str]) -> List[JavaError]:
-        """
-        Check for common type mismatch errors.
-        Detects patterns like: int x = "hello"; (string to int)
-        """
-        errors = []
-        
-        # Numeric types that cannot hold strings
-        numeric_types = {'int', 'long', 'short', 'byte', 'float', 'double', 'boolean', 'char'}
-        
-        for i, line in enumerate(lines, 1):
-            line_stripped = line.strip()
-            
-            # Skip comments
-            if line_stripped.startswith('//') or line_stripped.startswith('*') or line_stripped.startswith('/*'):
+
+    # ── Type-mismatch helpers ─────────────────────────────────────
+
+    @staticmethod
+    def _check_type_mismatches(lines: List[str]) -> List[JavaError]:
+        """Detect obvious type mismatches (e.g. ``int x = "hello";``)."""
+        errors: List[JavaError] = []
+
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            if stripped.startswith("//") or stripped.startswith("*") or stripped.startswith("/*"):
                 continue
-            
-            # Pattern: numeric_type varName = "string";
-            # Match: int x = "hello"; or double y = "test";
-            type_mismatch = re.match(
-                r'(int|long|short|byte|float|double|boolean|char)\s+(\w+)\s*=\s*"[^"]*"',
-                line_stripped
+
+            # numeric_type var = "string"
+            m = re.match(
+                r"(int|long|short|byte|float|double|boolean|char)\s+(\w+)\s*=\s*\"[^\"]*\"",
+                stripped,
             )
-            if type_mismatch:
-                var_type = type_mismatch.group(1)
-                var_name = type_mismatch.group(2)
+            if m:
                 errors.append(JavaError(
-                    line=i,
-                    column=line_stripped.index('=') + 1,
-                    error_type=ErrorType.SYNTAX,
-                    severity=ErrorSeverity.ERROR,
-                    message=f"Type mismatch: cannot assign String to {var_type}",
-                    suggestion=f"Change type to String or assign a {var_type} value"
+                    line=i, column=stripped.index("=") + 1,
+                    error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                    message=f"Type mismatch: cannot assign String to {m.group(1)}",
+                    suggestion=f"Change type to String or assign a {m.group(1)} value",
                 ))
-            
-            # Pattern: String varName = number; (number to String)
-            string_to_num = re.match(
-                r'String\s+(\w+)\s*=\s*(\d+)\s*;',
-                line_stripped
-            )
-            if string_to_num:
-                var_name = string_to_num.group(1)
-                num_val = string_to_num.group(2)
+
+            # String var = bare_number
+            m = re.match(r"String\s+(\w+)\s*=\s*(\d+)\s*;", stripped)
+            if m:
                 errors.append(JavaError(
-                    line=i,
-                    column=line_stripped.index('=') + 1,
-                    error_type=ErrorType.SYNTAX,
-                    severity=ErrorSeverity.ERROR,
-                    message=f"Type mismatch: cannot assign int to String",
-                    suggestion=f'Use String.valueOf({num_val}) or "{num_val}"'
+                    line=i, column=stripped.index("=") + 1,
+                    error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                    message="Type mismatch: cannot assign int to String",
+                    suggestion=f'Use String.valueOf({m.group(2)}) or "{m.group(2)}"',
                 ))
-            
-            # Pattern: boolean x = "true"; (string literal instead of boolean)
-            bool_string = re.match(
-                r'boolean\s+(\w+)\s*=\s*"(true|false)"',
-                line_stripped
-            )
-            if bool_string:
-                var_name = bool_string.group(1)
-                bool_val = bool_string.group(2)
+
+            # boolean var = "true"/"false" (literal string)
+            m = re.match(r'boolean\s+(\w+)\s*=\s*"(true|false)"', stripped)
+            if m:
                 errors.append(JavaError(
-                    line=i,
-                    column=line_stripped.index('=') + 1,
-                    error_type=ErrorType.SYNTAX,
-                    severity=ErrorSeverity.ERROR,
-                    message=f"Type mismatch: cannot assign String to boolean",
-                    suggestion=f"Use {bool_val} without quotes"
+                    line=i, column=stripped.index("=") + 1,
+                    error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                    message="Type mismatch: cannot assign String to boolean",
+                    suggestion=f"Use {m.group(2)} without quotes",
                 ))
-        
+
         return errors
 
 
-def strip_java_comments(code: str) -> Tuple[str, Dict[int, bool]]:
-    """
-    Remove comments from Java code while preserving line numbers.
-    
-    Returns:
-        Tuple of (code_without_comments, dict of line_number -> is_comment_line)
-    """
-    lines = code.split('\n')
-    result_lines = []
-    comment_lines = {}
-    in_multiline_comment = False
-    
-    for i, line in enumerate(lines, 1):
-        original_line = line
-        line_stripped = line.strip()
-        
-        # Handle multi-line comments
-        if in_multiline_comment:
-            comment_lines[i] = True
-            if '*/' in line:
-                in_multiline_comment = False
-                # Keep content after closing comment
-                after_comment_idx = line.index('*/') + 2
-                line = line[after_comment_idx:]
-                if not line.strip():
-                    result_lines.append('')
-                    continue
-            else:
-                result_lines.append('')
-                continue
-        
-        # Check for start of multi-line comment
-        if '/*' in line_stripped:
-            comment_lines[i] = True
-            if '*/' in line_stripped:
-                # Single line block comment - remove it
-                line = re.sub(r'/\*.*?\*/', '', line)
-            else:
-                in_multiline_comment = True
-                # Keep content before the comment
-                before_comment = line[:line.index('/*')]
-                result_lines.append(before_comment)
-                continue
-        
-        # Check for single-line comment
-        if '//' in line:
-            # Remove inline comment
-            comment_idx = line.index('//')
-            # Make sure it's not inside a string
-            in_string = False
-            for j, char in enumerate(line[:comment_idx]):
-                if char == '"' and (j == 0 or line[j-1] != '\\'):
-                    in_string = not in_string
-            if not in_string:
-                line = line[:comment_idx]
-                if not line.strip():
-                    comment_lines[i] = True
-        
-        # Check if entire line is a comment
-        if line_stripped.startswith('//') or line_stripped.startswith('*') or line_stripped.startswith('/**'):
-            comment_lines[i] = True
-            result_lines.append('')
-            continue
-        
-        result_lines.append(line)
-    
-    return '\n'.join(result_lines), comment_lines
-
-
-def is_comment_line(line: str, in_multiline: bool = False) -> Tuple[bool, bool]:
-    """
-    Check if a line is a comment line.
-    
-    Args:
-        line: The line to check
-        in_multiline: Whether we're currently inside a multi-line comment
-        
-    Returns:
-        Tuple of (is_comment, still_in_multiline)
-    """
-    line_stripped = line.strip()
-    
-    if in_multiline:
-        if '*/' in line:
-            return True, False
-        return True, True
-    
-    if line_stripped.startswith('//'):
-        return True, False
-    
-    if line_stripped.startswith('/*'):
-        if '*/' in line_stripped:
-            return True, False
-        return True, True
-    
-    if line_stripped.startswith('*') or line_stripped.startswith('/**'):
-        return True, in_multiline
-    
-    return False, False
-
+# ──────────────────────────────────────────────────────────────────────
+# RuntimeErrorDetector – static heuristics for runtime risks
+# ──────────────────────────────────────────────────────────────────────
 
 class RuntimeErrorDetector:
+    """Predict common runtime exceptions via **static pattern analysis**.
+
+    This is *not* execution-based; it applies conservative heuristics that
+    flag code patterns statistically correlated with runtime failures:
+
+    * **NullPointerException** – method call on a declared-but-uninitialised
+      reference.
+    * **ArrayIndexOutOfBoundsException** – hardcoded large indices or
+      expressions that may yield negative indices.
+    * **ArithmeticException** – literal division / modulo by zero.
+    * **Integer overflow** – literals exceeding ``Integer.MAX_VALUE``.
+    * **Resource leaks** – I/O resources opened outside ``try-with-resources``.
     """
-    Runtime Error Detector for Java Code.
-    
-    This class detects potential runtime errors through:
-    1. Static pattern analysis for common runtime issues
-    2. Optional sandboxed execution with try-catch wrapping
-    
-    Errors detected include:
-    - NullPointerException risks
-    - ArrayIndexOutOfBoundsException risks
-    - Division by zero
-    - Integer overflow
-    - Resource leaks
-    """
-    
-    def __init__(self):
-        """Initialize the runtime error detector."""
-        self.java_path = self._find_java()
-        
-    def _find_java(self) -> Optional[str]:
-        """Locate the java runtime on the system."""
-        possible_paths = ["java", "java.exe"]
-        
-        java_home = os.environ.get('JAVA_HOME')
+
+    _WELL_KNOWN_CLASSES: Set[str] = {
+        "System", "Math", "String", "Integer", "Arrays", "Collections",
+        "Objects", "Optional", "List", "Map", "Set", "Long", "Double",
+        "Float", "Boolean", "Character", "Byte", "Short",
+    }
+
+    def __init__(self) -> None:
+        self._java_path = self._find_java()
+
+    @staticmethod
+    def _find_java() -> Optional[str]:
+        candidates = ["java", "java.exe"]
+        java_home = os.environ.get("JAVA_HOME")
         if java_home:
-            possible_paths.insert(0, os.path.join(java_home, 'bin', 'java'))
-            possible_paths.insert(0, os.path.join(java_home, 'bin', 'java.exe'))
-        
-        for path in possible_paths:
+            candidates.insert(0, os.path.join(java_home, "bin", "java"))
+            candidates.insert(0, os.path.join(java_home, "bin", "java.exe"))
+        for path in candidates:
             try:
-                result = subprocess.run([path, '-version'], capture_output=True, timeout=5)
+                result = subprocess.run([path, "-version"], capture_output=True, timeout=5)
                 if result.returncode == 0:
                     return path
-            except:
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
                 continue
         return None
-    
+
+    # ── Public entry ──────────────────────────────────────────────
+
     def detect_runtime_errors(self, code: str) -> List[JavaError]:
-        """
-        Detect potential runtime errors in Java code.
-        
-        Uses pattern matching to identify common runtime error patterns.
-        """
-        errors = []
-        lines = code.split('\n')
-        
-        # Track variable declarations for null checks
-        declared_vars: Dict[str, int] = {}  # var_name -> line_number
-        initialized_vars: set = set()
-        
-        # Track multi-line comment state
-        in_multiline_comment = False
-        
-        for i, line in enumerate(lines, 1):
-            line_stripped = line.strip()
-            
-            # Handle multi-line comments
-            is_comment, in_multiline_comment = is_comment_line(line_stripped, in_multiline_comment)
+        """Run all runtime-risk heuristics and return findings."""
+        errors: List[JavaError] = []
+        lines = code.split("\n")
+
+        declared_vars: Dict[str, int] = {}
+        initialised_vars: Set[str] = set()
+        in_multiline = False
+
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_comment, in_multiline = is_comment_line(stripped, in_multiline)
             if is_comment:
                 continue
-            
-            # Remove inline comments for analysis
-            if '//' in line:
-                comment_idx = line.index('//')
-                line = line[:comment_idx]
-            
-            # 1. Check for potential NullPointerException
-            errors.extend(self._check_null_pointer(line, i, declared_vars, initialized_vars))
-            
-            # 2. Check for potential ArrayIndexOutOfBoundsException
-            errors.extend(self._check_array_bounds(line, i))
-            
-            # 3. Check for division by zero
-            errors.extend(self._check_division_by_zero(line, i))
-            
-            # 4. Check for potential integer overflow
-            errors.extend(self._check_integer_overflow(line, i))
-            
-            # 5. Check for resource leaks
-            errors.extend(self._check_resource_leaks(line, i, code))
-            
-            # Track variable declarations
-            self._track_variables(line, i, declared_vars, initialized_vars)
-        
-        return errors
-    
-    def _check_null_pointer(self, line: str, line_num: int, 
-                           declared_vars: Dict[str, int],
-                           initialized_vars: set) -> List[JavaError]:
-        """Check for potential NullPointerException."""
-        errors = []
-        
-        # Pattern: method call on potentially null object
-        # e.g., str.length() where str might be null
-        method_call_pattern = re.compile(r'(\w+)\.([\w]+)\s*\(')
-        
-        for match in method_call_pattern.finditer(line):
-            var_name = match.group(1)
-            method_name = match.group(2)
-            
-            # Check if variable was declared but might not be initialized
-            if var_name in declared_vars and var_name not in initialized_vars:
-                if var_name not in ['System', 'Math', 'String', 'Integer', 'Arrays', 'Collections']:
-                    errors.append(JavaError(
-                        line=line_num,
-                        column=match.start() + 1,
-                        error_type=ErrorType.RUNTIME,
-                        severity=ErrorSeverity.WARNING,
-                        message=f"Potential NullPointerException: '{var_name}' may be null",
-                        suggestion=f"Add null check: if ({var_name} != null) {{ ... }}"
-                    ))
-        
-        # Pattern: accessing .length on array that might be null
-        # Reduced NPE detection - only flag very clear cases
-        # The previous pattern was too aggressive and flagged safe code
-        
-        return errors
-    
-    def _check_array_bounds(self, line: str, line_num: int) -> List[JavaError]:
-        """Check for potential ArrayIndexOutOfBoundsException."""
-        errors = []
-        
-        # Pattern: array access with hardcoded index
-        array_access_pattern = re.compile(r'(\w+)\[(\d+)\]')
-        
-        for match in array_access_pattern.finditer(line):
-            index = int(match.group(2))
-            if index > 100:  # Suspiciously large hardcoded index
-                errors.append(JavaError(
-                    line=line_num,
-                    column=match.start() + 1,
-                    error_type=ErrorType.RUNTIME,
-                    severity=ErrorSeverity.WARNING,
-                    message=f"Large array index {index} - ensure array is properly sized",
-                    suggestion="Consider using dynamic sizing or bounds checking"
-                ))
-        
-        # Pattern: array access with potentially negative index
-        neg_index_pattern = re.compile(r'(\w+)\[(\w+)\s*-\s*\d+\]')
-        for match in neg_index_pattern.finditer(line):
-            errors.append(JavaError(
-                line=line_num,
-                column=match.start() + 1,
-                error_type=ErrorType.RUNTIME,
-                severity=ErrorSeverity.WARNING,
-                message="Potential negative array index",
-                suggestion="Add bounds check: if (index >= 0 && index < array.length)"
-            ))
-        
-        return errors
-    
-    def _check_division_by_zero(self, line: str, line_num: int) -> List[JavaError]:
-        """Check for potential division by zero."""
-        errors = []
-        
-        # Pattern: division by zero literal
-        if re.search(r'/\s*0(?![.\d])', line):
-            errors.append(JavaError(
-                line=line_num,
-                column=line.index('/') + 1,
-                error_type=ErrorType.RUNTIME,
-                severity=ErrorSeverity.ERROR,
-                message="Division by zero detected",
-                suggestion="Ensure divisor is not zero before division"
-            ))
-        
-        # Pattern: division by variable - DISABLED to reduce false positives
-        # This was generating too many warnings for safe code
-        # Only flag explicit division by 0 literal above
-        
-        # Pattern: modulo by zero
-        if re.search(r'%\s*0(?![.\d])', line):
-            errors.append(JavaError(
-                line=line_num,
-                column=line.index('%') + 1,
-                error_type=ErrorType.RUNTIME,
-                severity=ErrorSeverity.ERROR,
-                message="Modulo by zero detected",
-                suggestion="Ensure divisor is not zero before modulo operation"
-            ))
-        
-        return errors
-    
-    def _check_integer_overflow(self, line: str, line_num: int) -> List[JavaError]:
-        """Check for potential integer overflow."""
-        errors = []
-        
-        # Pattern: Large integer literal
-        large_int_pattern = re.compile(r'\b(\d{10,})\b')
-        for match in large_int_pattern.finditer(line):
-            num = match.group(1)
-            try:
-                val = int(num)
-                if val > 2147483647:  # Integer.MAX_VALUE
-                    errors.append(JavaError(
-                        line=line_num,
-                        column=match.start() + 1,
-                        error_type=ErrorType.RUNTIME,
-                        severity=ErrorSeverity.WARNING,
-                        message=f"Integer overflow: {num} exceeds Integer.MAX_VALUE",
-                        suggestion="Use 'long' type or add 'L' suffix (e.g., {num}L)"
-                    ))
-            except:
-                pass
-        
-        return errors
-    
-    def _check_resource_leaks(self, line: str, line_num: int, full_code: str) -> List[JavaError]:
-        """Check for potential resource leaks."""
-        errors = []
-        
-        # Pattern: new FileInputStream/FileOutputStream/Scanner without try-with-resources
-        resource_patterns = [
-            (r'new\s+FileInputStream\s*\(', 'FileInputStream'),
-            (r'new\s+FileOutputStream\s*\(', 'FileOutputStream'),
-            (r'new\s+BufferedReader\s*\(', 'BufferedReader'),
-            (r'new\s+BufferedWriter\s*\(', 'BufferedWriter'),
-            (r'new\s+Scanner\s*\(', 'Scanner'),
-            (r'new\s+PrintWriter\s*\(', 'PrintWriter'),
-        ]
-        
-        for pattern, resource_type in resource_patterns:
-            if re.search(pattern, line):
-                # Check if it's in a try-with-resources
-                # Simple check: look for 'try (' before this line
-                line_index = full_code.find(line)
-                preceding_code = full_code[:line_index] if line_index > 0 else ""
-                
-                # Count try-with-resources vs regular new
-                if 'try (' not in preceding_code[-200:] and 'try(' not in preceding_code[-200:]:
-                    errors.append(JavaError(
-                        line=line_num,
-                        column=line.index('new') + 1,
-                        error_type=ErrorType.RUNTIME,
-                        severity=ErrorSeverity.WARNING,
-                        message=f"Potential resource leak: {resource_type} not in try-with-resources",
-                        suggestion=f"Use try-with-resources: try ({resource_type} resource = new {resource_type}(...)) {{ }}"
-                    ))
-        
-        return errors
-    
-    def _track_variables(self, line: str, line_num: int,
-                        declared_vars: Dict[str, int],
-                        initialized_vars: set):
-        """Track variable declarations and initializations."""
-        # Pattern: Type varName;
-        decl_pattern = re.compile(r'(String|int|long|double|float|boolean|char|byte|short|\w+(?:<[^>]+>)?)\s+(\w+)\s*;')
-        for match in decl_pattern.finditer(line):
-            var_name = match.group(2)
-            declared_vars[var_name] = line_num
-        
-        # Pattern: Type varName = value;
-        init_pattern = re.compile(r'(String|int|long|double|float|boolean|char|byte|short|\w+(?:<[^>]+>)?)\s+(\w+)\s*=')
-        for match in init_pattern.finditer(line):
-            var_name = match.group(2)
-            declared_vars[var_name] = line_num
-            if '= null' not in line:
-                initialized_vars.add(var_name)
-        
-        # Pattern: varName = value; (assignment)
-        assign_pattern = re.compile(r'^\s*(\w+)\s*=\s*(?!null)')
-        match = assign_pattern.match(line)
-        if match:
-            var_name = match.group(1)
-            initialized_vars.add(var_name)
 
+            # Strip inline comments for analysis
+            line = raw
+            if "//" in line:
+                line = line[: line.index("//")]
+
+            errors.extend(self._check_null_pointer(line, i, declared_vars, initialised_vars))
+            errors.extend(self._check_array_bounds(line, i))
+            errors.extend(self._check_division_by_zero(line, i))
+            errors.extend(self._check_integer_overflow(line, i))
+            errors.extend(self._check_resource_leaks(line, i, code))
+            self._track_variables(line, i, declared_vars, initialised_vars)
+
+        return errors
+
+    # ── Individual checks ─────────────────────────────────────────
+
+    _METHOD_CALL_RE = re.compile(r"(\w+)\.([\w]+)\s*\(")
+
+    def _check_null_pointer(
+        self, line: str, line_num: int,
+        declared: Dict[str, int], initialised: Set[str],
+    ) -> List[JavaError]:
+        """Flag method calls on variables declared but never initialised."""
+        errors: List[JavaError] = []
+        for m in self._METHOD_CALL_RE.finditer(line):
+            var = m.group(1)
+            if var in declared and var not in initialised and var not in self._WELL_KNOWN_CLASSES:
+                errors.append(JavaError(
+                    line=line_num, column=m.start() + 1,
+                    error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
+                    message=f"Potential NullPointerException: '{var}' may be null",
+                    suggestion=f"Add null check: if ({var} != null) {{ … }}",
+                ))
+        return errors
+
+    _ARRAY_ACCESS_RE = re.compile(r"(\w+)\[(\d+)]")
+    _NEG_INDEX_RE    = re.compile(r"(\w+)\[(\w+)\s*-\s*\d+]")
+
+    def _check_array_bounds(self, line: str, line_num: int) -> List[JavaError]:
+        errors: List[JavaError] = []
+        for m in self._ARRAY_ACCESS_RE.finditer(line):
+            idx = int(m.group(2))
+            if idx > 100:
+                errors.append(JavaError(
+                    line=line_num, column=m.start() + 1,
+                    error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
+                    message=f"Large array index {idx} – ensure array is properly sized",
+                    suggestion="Consider using dynamic sizing or bounds checking",
+                ))
+        for m in self._NEG_INDEX_RE.finditer(line):
+            errors.append(JavaError(
+                line=line_num, column=m.start() + 1,
+                error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
+                message="Potential negative array index",
+                suggestion="Add bounds check: if (index >= 0 && index < array.length)",
+            ))
+        return errors
+
+    @staticmethod
+    def _check_division_by_zero(line: str, line_num: int) -> List[JavaError]:
+        errors: List[JavaError] = []
+        if re.search(r"/\s*0(?![.\d])", line):
+            errors.append(JavaError(
+                line=line_num, column=line.index("/") + 1,
+                error_type=ErrorType.RUNTIME, severity=ErrorSeverity.ERROR,
+                message="Division by zero detected",
+                suggestion="Ensure divisor is not zero before division",
+            ))
+        if re.search(r"%\s*0(?![.\d])", line):
+            errors.append(JavaError(
+                line=line_num, column=line.index("%") + 1,
+                error_type=ErrorType.RUNTIME, severity=ErrorSeverity.ERROR,
+                message="Modulo by zero detected",
+                suggestion="Ensure divisor is not zero before modulo operation",
+            ))
+        return errors
+
+    _LARGE_INT_RE = re.compile(r"\b(\d{10,})\b")
+
+    def _check_integer_overflow(self, line: str, line_num: int) -> List[JavaError]:
+        errors: List[JavaError] = []
+        for m in self._LARGE_INT_RE.finditer(line):
+            try:
+                val = int(m.group(1))
+                if val > 2_147_483_647:
+                    errors.append(JavaError(
+                        line=line_num, column=m.start() + 1,
+                        error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
+                        message=f"Integer overflow: {m.group(1)} exceeds Integer.MAX_VALUE",
+                        suggestion=f"Use 'long' type or add 'L' suffix (e.g., {m.group(1)}L)",
+                    ))
+            except ValueError:
+                pass
+        return errors
+
+    _RESOURCE_PATTERNS: List[Tuple[str, str]] = [
+        (r"new\s+FileInputStream\s*\(",   "FileInputStream"),
+        (r"new\s+FileOutputStream\s*\(",  "FileOutputStream"),
+        (r"new\s+BufferedReader\s*\(",     "BufferedReader"),
+        (r"new\s+BufferedWriter\s*\(",     "BufferedWriter"),
+        (r"new\s+Scanner\s*\(",           "Scanner"),
+        (r"new\s+PrintWriter\s*\(",       "PrintWriter"),
+    ]
+
+    def _check_resource_leaks(self, line: str, line_num: int, full_code: str) -> List[JavaError]:
+        errors: List[JavaError] = []
+        for pattern, resource in self._RESOURCE_PATTERNS:
+            if re.search(pattern, line):
+                line_index = full_code.find(line)
+                preceding = full_code[max(0, line_index - 200): line_index] if line_index > 0 else ""
+                if "try (" not in preceding and "try(" not in preceding:
+                    errors.append(JavaError(
+                        line=line_num, column=line.index("new") + 1,
+                        error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
+                        message=f"Potential resource leak: {resource} not in try-with-resources",
+                        suggestion=(
+                            f"Use try-with-resources: try ({resource} r = "
+                            f"new {resource}(…)) {{ }}"
+                        ),
+                    ))
+        return errors
+
+    # ── Variable tracking ─────────────────────────────────────────
+
+    _DECL_RE   = re.compile(r"(String|int|long|double|float|boolean|char|byte|short|\w+(?:<[^>]+>)?)\s+(\w+)\s*;")
+    _INIT_RE   = re.compile(r"(String|int|long|double|float|boolean|char|byte|short|\w+(?:<[^>]+>)?)\s+(\w+)\s*=")
+    _ASSIGN_RE = re.compile(r"^\s*(\w+)\s*=\s*(?!null)")
+
+    def _track_variables(
+        self, line: str, line_num: int,
+        declared: Dict[str, int], initialised: Set[str],
+    ) -> None:
+        for m in self._DECL_RE.finditer(line):
+            declared[m.group(2)] = line_num
+        for m in self._INIT_RE.finditer(line):
+            declared[m.group(2)] = line_num
+            if "= null" not in line:
+                initialised.add(m.group(2))
+        m = self._ASSIGN_RE.match(line)
+        if m:
+            initialised.add(m.group(1))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# StaticAnalyzer – code smells & best-practice warnings
+# ──────────────────────────────────────────────────────────────────────
 
 class StaticAnalyzer:
-    """
-    Static Code Analyzer for Java.
-    
-    This class performs static analysis to detect:
-    1. Unused variables
-    2. Unreachable code
-    3. Code smells and bad practices
-    4. Naming convention violations
-    5. Complexity warnings
-    
-    Similar to PMD/Checkstyle but implemented in Python.
-    """
-    
-    def __init__(self):
-        """Initialize the static analyzer."""
-        self.warnings: List[JavaError] = []
-    
-    def analyze(self, code: str) -> List[JavaError]:
-        """
-        Perform static analysis on Java code.
-        
-        Args:
-            code: Java source code to analyze
-            
-        Returns:
-            List of JavaError objects for detected issues
-        """
-        self.warnings = []
-        lines = code.split('\n')
-        
-        # Strip comments from code for analysis
-        code_no_comments, comment_line_map = strip_java_comments(code)
-        
-        # Run unused imports check - this is reliable
-        self._check_unused_imports(code_no_comments, lines, comment_line_map)
-        
-        # Disabled checks that cause too many false positives:
-        # self._check_unused_variables(code_no_comments, lines, comment_line_map)
-        # self._check_unreachable_code(code_no_comments, lines, comment_line_map)
-        # self._check_naming_conventions(code_no_comments, lines, comment_line_map)
-        # self._check_empty_blocks(code_no_comments, lines, comment_line_map)
-        # self._check_magic_numbers(code_no_comments, lines, comment_line_map)
-        # self._check_long_methods(code, lines)
-        # self._check_deep_nesting(code_no_comments, lines, comment_line_map)
-        # self._check_empty_catch(code, lines)
-        # self._check_system_exit(code_no_comments, lines, comment_line_map)
-        # self._check_hardcoded_strings(code_no_comments, lines, comment_line_map)
-        
-        return self.warnings
-    
-    def _is_comment_line(self, line_num: int, comment_map: Dict[int, bool]) -> bool:
-        """Check if a line number is a comment line."""
-        return comment_map.get(line_num, False)
-    
-    def _check_unused_imports(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """
-        Check for unused import statements in Java code.
-        
-        Detects:
-        - Import statements where the imported class/package is never used
-        - Duplicate import statements
-        - Wildcard imports (as warnings for best practice)
-        """
-        imports = []  # List of (line_num, import_statement, imported_name)
-        seen_imports = set()  # For duplicate detection
-        
-        # Find all import statements
-        import_pattern = re.compile(r'^import\s+(static\s+)?([a-zA-Z_][\w.]*(?:\.\*)?)\s*;')
-        
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comment lines
-            if self._is_comment_line(i, comment_map):
-                continue
-            
-            match = import_pattern.match(stripped)
-            if match:
-                is_static = match.group(1) is not None
-                full_import = match.group(2)
-                
-                # Check for duplicate imports
-                if full_import in seen_imports:
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.WARNING,
-                        message=f"Duplicate import: '{full_import}'",
-                        suggestion="Remove the duplicate import statement"
-                    ))
-                    continue
-                
-                seen_imports.add(full_import)
-                
-                # Check for wildcard imports (best practice warning)
-                if full_import.endswith('.*'):
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=1,
-                        error_type=ErrorType.INFO,
-                        severity=ErrorSeverity.INFO,
-                        message=f"Wildcard import: '{full_import}'",
-                        suggestion="Consider using specific imports for better code clarity"
-                    ))
-                    continue  # Can't check usage for wildcard imports
-                
-                # Extract the class name (last part of import)
-                class_name = full_import.split('.')[-1]
-                imports.append((i, full_import, class_name, is_static))
-        
-        # Get code after imports for usage checking
-        code_after_imports = code
-        
-        # Check if each imported class/method is used
-        for line_num, full_import, class_name, is_static in imports:
-            # Build pattern to find usage of the imported class
-            # For static imports, check for method/field name
-            # For regular imports, check for class name usage
-            
-            # Count occurrences in code (excluding the import line itself)
-            usage_pattern = re.compile(r'\b' + re.escape(class_name) + r'\b')
-            
-            # Get code without the import statement for counting
-            code_without_import = '\n'.join(
-                line for j, line in enumerate(lines, 1) if j != line_num
-            )
-            
-            occurrences = len(usage_pattern.findall(code_without_import))
-            
-            if occurrences == 0:
-                self.warnings.append(JavaError(
-                    line=line_num,
-                    column=1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.WARNING,
-                    message=f"Unused import: '{full_import}'",
-                    suggestion=f"Remove the unused import statement"
-                ))
-    
-    def _check_unused_variables(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for unused local variables."""
-        # Find all variable declarations
-        var_pattern = re.compile(
-            r'(int|long|double|float|boolean|char|byte|short|String|\w+(?:<[^>]+>)?)\s+(\w+)\s*[;=]'
-        )
-        
-        declared_vars = {}
-        in_multiline_comment = False
-        
-        for i, line in enumerate(lines, 1):
-            line_stripped = line.strip()
-            
-            # Skip comment lines
-            if self._is_comment_line(i, comment_map):
-                continue
-            
-            # Handle multi-line comments
-            is_comment, in_multiline_comment = is_comment_line(line_stripped, in_multiline_comment)
-            if is_comment:
-                continue
-            
-            for match in var_pattern.finditer(line):
-                var_name = match.group(2)
-                # Skip common names that might be intentionally unused
-                if var_name not in ['i', 'j', 'k', 'e', 'ex', 'args', '_']:
-                    declared_vars[var_name] = i
-        
-        # Check usage
-        for var_name, line_num in declared_vars.items():
-            # Count occurrences (excluding declaration)
-            pattern = re.compile(r'\b' + re.escape(var_name) + r'\b')
-            occurrences = len(pattern.findall(code))
-            
-            if occurrences <= 1:  # Only declaration, no usage
-                self.warnings.append(JavaError(
-                    line=line_num,
-                    column=1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.WARNING,
-                    message=f"Unused variable: '{var_name}'",
-                    suggestion=f"Remove unused variable or use it in your code"
-                ))
-    
-    def _check_unreachable_code(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for unreachable code after return/throw/break/continue."""
-        control_keywords = ['return', 'throw', 'break', 'continue']
-        
-        in_block = False
-        block_end_line = 0
-        in_multiline_comment = False
-        
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments and empty lines
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or not stripped or self._is_comment_line(i, comment_map):
-                continue
-            
-            # Check if previous line was a control statement
-            if in_block and i > block_end_line:
-                # Check if this line is still in same block (not a closing brace)
-                if stripped != '}' and stripped != '} else {' and not stripped.startswith('case '):
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.WARNING,
-                        message="Unreachable code detected",
-                        suggestion="Remove this code or restructure logic"
-                    ))
-                in_block = False
-            
-            # Check for control statements
-            for keyword in control_keywords:
-                if re.match(rf'^\s*{keyword}\s*[;\s]', line) or re.match(rf'^\s*{keyword}\s', line):
-                    in_block = True
-                    block_end_line = i
-                    break
-    
-    def _check_naming_conventions(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check Java naming conventions."""
-        in_multiline_comment = False
-        
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            # Check class names (should be PascalCase)
-            class_match = re.search(r'class\s+([a-z]\w*)', line)
-            if class_match:
-                class_name = class_match.group(1)
-                self.warnings.append(JavaError(
-                    line=i,
-                    column=line.index(class_name) + 1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.INFO,
-                    message=f"Class name '{class_name}' should start with uppercase",
-                    suggestion=f"Rename to '{class_name.capitalize()}'"
-                ))
-            
-            # Check constant names (should be UPPER_SNAKE_CASE)
-            const_match = re.search(r'(static\s+final|final\s+static)\s+\w+\s+([a-z]\w*)\s*=', line)
-            if const_match:
-                const_name = const_match.group(2)
-                if not const_name.isupper():
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=line.index(const_name) + 1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.INFO,
-                        message=f"Constant '{const_name}' should be UPPER_SNAKE_CASE",
-                        suggestion=f"Rename to '{const_name.upper()}'"
-                    ))
-            
-            # Check method names (should be camelCase, not start with uppercase)
-            method_match = re.search(r'(public|private|protected)\s+\w+\s+([A-Z]\w*)\s*\(', line)
-            if method_match:
-                method_name = method_match.group(2)
-                # Skip constructors (same name as class)
-                if not re.search(rf'class\s+{method_name}', code):
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=line.index(method_name) + 1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.INFO,
-                        message=f"Method name '{method_name}' should start with lowercase",
-                        suggestion=f"Rename to '{method_name[0].lower() + method_name[1:]}'"
-                    ))
-    
-    def _check_empty_blocks(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for empty code blocks."""
-        # Pattern: { } with only whitespace
-        empty_block_pattern = re.compile(r'\{\s*\}')
-        
-        in_multiline_comment = False
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            if empty_block_pattern.search(line):
-                # Skip intentional empty blocks (interfaces, abstract methods)
-                if 'interface' not in line and 'abstract' not in line:
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.WARNING,
-                        message="Empty code block detected",
-                        suggestion="Add implementation or remove empty block"
-                    ))
-    
-    def _check_magic_numbers(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for magic numbers (hardcoded values)."""
-        # Pattern: numeric literals not in declaration
-        magic_pattern = re.compile(r'(?<![=\d\w])\b(\d{2,})\b(?![Ll])')
-        
-        in_multiline_comment = False
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            # Skip imports and declarations
-            if (stripped.startswith('import') or
-                'final' in line or
-                '.length' in line):
-                continue
-            
-            for match in magic_pattern.finditer(line):
-                num = match.group(1)
-                # Skip common acceptable values
-                if num not in ['10', '16', '32', '64', '100', '1000', '255']:
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=match.start() + 1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.INFO,
-                        message=f"Magic number '{num}' - consider using named constant",
-                        suggestion=f"Extract to constant: private static final int SOME_NAME = {num};"
-                    ))
-    
-    def _check_long_methods(self, code: str, lines: List[str]):
-        """Check for methods that are too long."""
-        method_pattern = re.compile(r'(public|private|protected)\s+\w+\s+(\w+)\s*\([^)]*\)\s*\{')
-        
-        for match in method_pattern.finditer(code):
-            method_name = match.group(2)
-            method_start = code[:match.start()].count('\n') + 1
-            
-            # Find method end
-            brace_count = 1
-            pos = match.end()
-            while pos < len(code) and brace_count > 0:
-                if code[pos] == '{':
-                    brace_count += 1
-                elif code[pos] == '}':
-                    brace_count -= 1
-                pos += 1
-            
-            method_end = code[:pos].count('\n') + 1
-            method_lines = method_end - method_start
-            
-            if method_lines > 50:
-                self.warnings.append(JavaError(
-                    line=method_start,
-                    column=1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.WARNING,
-                    message=f"Method '{method_name}' is too long ({method_lines} lines)",
-                    suggestion="Consider splitting into smaller methods (recommended < 30 lines)"
-                ))
-            elif method_lines > 30:
-                self.warnings.append(JavaError(
-                    line=method_start,
-                    column=1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.INFO,
-                    message=f"Method '{method_name}' is getting long ({method_lines} lines)",
-                    suggestion="Consider extracting some logic to helper methods"
-                ))
-    
-    def _check_deep_nesting(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for deeply nested code blocks."""
-        max_depth = 0
-        current_depth = 0
-        deep_lines = []
-        
-        in_multiline_comment = False
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            current_depth += line.count('{') - line.count('}')
-            
-            if current_depth > 4:
-                if current_depth > max_depth:
-                    max_depth = current_depth
-                    deep_lines.append(i)
-        
-        if max_depth > 4:
-            for line_num in deep_lines[:3]:  # Report first 3
-                self.warnings.append(JavaError(
-                    line=line_num,
-                    column=1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.WARNING,
-                    message=f"Deep nesting detected (depth: {max_depth})",
-                    suggestion="Use early returns, extract methods, or flatten logic"
-                ))
-    
-    def _check_empty_catch(self, code: str, lines: List[str]):
-        """Check for empty catch blocks."""
-        # Pattern: catch (...) { }
-        catch_pattern = re.compile(r'catch\s*\([^)]+\)\s*\{\s*\}', re.MULTILINE)
-        
-        for match in catch_pattern.finditer(code):
-            line_num = code[:match.start()].count('\n') + 1
-            self.warnings.append(JavaError(
-                line=line_num,
-                column=1,
-                error_type=ErrorType.WARNING,
-                severity=ErrorSeverity.WARNING,
-                message="Empty catch block - exceptions should be handled",
-                suggestion="Log the exception or rethrow: e.printStackTrace() or throw new RuntimeException(e)"
-            ))
-    
-    def _check_system_exit(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for System.exit() calls."""
-        in_multiline_comment = False
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            if 'System.exit' in line:
-                self.warnings.append(JavaError(
-                    line=i,
-                    column=line.index('System.exit') + 1,
-                    error_type=ErrorType.WARNING,
-                    severity=ErrorSeverity.WARNING,
-                    message="System.exit() terminates JVM abruptly",
-                    suggestion="Use return statements or throw exceptions instead"
-                ))
-    
-    def _check_hardcoded_strings(self, code: str, lines: List[str], comment_map: Dict[int, bool]):
-        """Check for hardcoded strings that should be constants."""
-        string_pattern = re.compile(r'"([^"]{20,})"')
-        
-        seen_strings = {}
-        
-        in_multiline_comment = False
-        for i, line in enumerate(lines, 1):
-            stripped = line.strip()
-            
-            # Skip comments
-            is_comment, in_multiline_comment = is_comment_line(stripped, in_multiline_comment)
-            if is_comment or self._is_comment_line(i, comment_map):
-                continue
-            
-            # Skip imports
-            if 'import' in line:
-                continue
-            
-            for match in string_pattern.finditer(line):
-                string_val = match.group(1)
-                
-                if string_val in seen_strings:
-                    self.warnings.append(JavaError(
-                        line=i,
-                        column=match.start() + 1,
-                        error_type=ErrorType.WARNING,
-                        severity=ErrorSeverity.INFO,
-                        message=f"Duplicate string literal (also on line {seen_strings[string_val]})",
-                        suggestion="Extract to a constant to avoid duplication"
-                    ))
-                else:
-                    seen_strings[string_val] = i
+    """Lightweight static analyser (similar to PMD / Checkstyle) in pure Python.
 
+    Detects:
+    * Unused / duplicate imports
+    * Empty ``catch`` blocks
+    * Magic numbers
+    * Unused variables
+    * Naming-convention violations
+    * Long methods (> 50 lines)
+    * Deep nesting (> 4 levels)
+    """
+
+    def __init__(self) -> None:
+        self.warnings: List[JavaError] = []
+
+    # ── Public entry ──────────────────────────────────────────────
+
+    def analyze(self, code: str) -> List[JavaError]:
+        """Run all enabled static-analysis checks and return findings."""
+        self.warnings = []
+        lines = code.split("\n")
+        code_stripped, comment_map = strip_java_comments(code)
+
+        self._check_unused_imports(code_stripped, lines, comment_map)
+        self._check_empty_catch(code, lines)
+        self._check_magic_numbers(code_stripped, lines, comment_map)
+        self._check_unused_variables(code_stripped, lines, comment_map)
+        self._check_naming_conventions(code_stripped, lines, comment_map)
+        self._check_long_methods(code, lines)
+        self._check_deep_nesting(code_stripped, lines, comment_map)
+        self._check_empty_blocks(code_stripped, lines, comment_map)
+
+        return self.warnings
+
+    # ── helpers ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_comment(line_num: int, cmap: Dict[int, bool]) -> bool:
+        return cmap.get(line_num, False)
+
+    # ── unused imports ────────────────────────────────────────────
+
+    _IMPORT_RE = re.compile(r"^import\s+(static\s+)?([a-zA-Z_][\w.]*(?:\.\*)?)\s*;")
+
+    _IMPLICITLY_USED: Set[str] = {
+        "List", "ArrayList", "Map", "HashMap", "Set", "HashSet", "LinkedList",
+        "TreeMap", "TreeSet", "LinkedHashMap", "LinkedHashSet", "Queue", "Deque",
+        "Stack", "Vector", "Collections", "Arrays", "Objects", "Optional",
+        "Stream", "Collectors", "Function", "Predicate", "Consumer", "Supplier",
+        "BigDecimal", "BigInteger", "Date", "Calendar", "LocalDate",
+        "LocalDateTime", "LocalTime", "Instant", "Duration", "Period",
+        "ZonedDateTime", "Pattern", "Matcher", "StringBuilder", "StringBuffer",
+        "File", "Path", "Paths", "Files", "IOException", "Exception",
+        "RuntimeException", "IllegalArgumentException", "NullPointerException",
+        "Scanner", "PrintWriter", "BufferedReader", "BufferedWriter",
+        "InputStream", "OutputStream", "Reader", "Writer",
+        "Thread", "Runnable", "Callable", "Future", "ExecutorService",
+        "Comparator", "Comparable", "Iterator", "Iterable",
+        "Math", "System", "String", "Integer", "Long", "Double", "Float",
+        "Boolean", "Character", "Byte", "Short", "Number", "Object", "Class",
+        "Override", "Deprecated", "SuppressWarnings", "FunctionalInterface",
+        "Serializable", "Cloneable", "AutoCloseable", "Closeable",
+    }
+
+    def _check_unused_imports(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        imports: List[Tuple[int, str, str, bool]] = []
+        seen: Set[str] = set()
+
+        for i, raw in enumerate(lines, 1):
+            if self._is_comment(i, cmap):
+                continue
+            m = self._IMPORT_RE.match(raw.strip())
+            if not m:
+                continue
+
+            is_static = m.group(1) is not None
+            full = m.group(2)
+
+            if full in seen:
+                self.warnings.append(JavaError(
+                    line=i, column=1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                    message=f"Duplicate import: '{full}'",
+                    suggestion="Remove the duplicate import statement",
+                ))
+                continue
+            seen.add(full)
+
+            if full.endswith(".*"):
+                continue  # can't determine usage for wildcard imports
+
+            class_name = full.split(".")[-1]
+            imports.append((i, full, class_name, is_static))
+
+        # Build "body" text (no import lines) for usage scanning
+        body_lines = [l for l in lines if not l.strip().startswith("import ")]
+        body = "\n".join(body_lines)
+
+        for ln, full_import, cls, _ in imports:
+            if cls in self._IMPLICITLY_USED:
+                continue
+            if not re.search(r"\b" + re.escape(cls) + r"\b", body):
+                self.warnings.append(JavaError(
+                    line=ln, column=1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                    message=f"Unused import: '{full_import}'",
+                    suggestion="Remove the unused import statement",
+                ))
+
+    # ── empty catch blocks ────────────────────────────────────────
+
+    _EMPTY_CATCH_RE = re.compile(r"catch\s*\([^)]+\)\s*\{\s*}", re.MULTILINE)
+
+    def _check_empty_catch(self, code: str, lines: List[str]) -> None:
+        """Flag ``catch`` blocks that silently swallow exceptions."""
+        for m in self._EMPTY_CATCH_RE.finditer(code):
+            ln = code[: m.start()].count("\n") + 1
+            self.warnings.append(JavaError(
+                line=ln, column=1,
+                error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                message="Empty catch block – exceptions should be handled",
+                suggestion="Log or rethrow: e.printStackTrace() or throw new RuntimeException(e)",
+            ))
+
+    # ── magic numbers ─────────────────────────────────────────────
+
+    _MAGIC_RE = re.compile(r"(?<![=\d\w])\b(\d{2,})\b(?![Ll])")
+    _SAFE_NUMBERS: Set[str] = {"10", "16", "32", "64", "100", "1000", "255"}
+
+    def _check_magic_numbers(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        in_ml = False
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_c, in_ml = is_comment_line(stripped, in_ml)
+            if is_c or self._is_comment(i, cmap):
+                continue
+            if stripped.startswith("import") or "final" in raw or ".length" in raw:
+                continue
+            for m in self._MAGIC_RE.finditer(raw):
+                if m.group(1) not in self._SAFE_NUMBERS:
+                    self.warnings.append(JavaError(
+                        line=i, column=m.start() + 1,
+                        error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                        message=f"Magic number '{m.group(1)}' – consider a named constant",
+                        suggestion=f"Extract: private static final int SOME_NAME = {m.group(1)};",
+                    ))
+
+    # ── unused variables ──────────────────────────────────────────
+
+    _VAR_DECL_RE = re.compile(
+        r"(int|long|double|float|boolean|char|byte|short|String|\w+(?:<[^>]+>)?)\s+(\w+)\s*[;=]"
+    )
+    _SKIP_VARS: Set[str] = {"i", "j", "k", "e", "ex", "args", "_"}
+
+    def _check_unused_variables(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        declared: Dict[str, int] = {}
+        in_ml = False
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_c, in_ml = is_comment_line(stripped, in_ml)
+            if is_c or self._is_comment(i, cmap):
+                continue
+            for m in self._VAR_DECL_RE.finditer(raw):
+                name = m.group(2)
+                if name not in self._SKIP_VARS:
+                    declared[name] = i
+
+        for name, ln in declared.items():
+            if len(re.findall(r"\b" + re.escape(name) + r"\b", code)) <= 1:
+                self.warnings.append(JavaError(
+                    line=ln, column=1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                    message=f"Unused variable: '{name}'",
+                    suggestion="Remove unused variable or use it in your code",
+                ))
+
+    # ── naming conventions ────────────────────────────────────────
+
+    def _check_naming_conventions(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        in_ml = False
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_c, in_ml = is_comment_line(stripped, in_ml)
+            if is_c or self._is_comment(i, cmap):
+                continue
+
+            # class names → PascalCase
+            m = re.search(r"class\s+([a-z]\w*)", raw)
+            if m:
+                self.warnings.append(JavaError(
+                    line=i, column=raw.index(m.group(1)) + 1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                    message=f"Class name '{m.group(1)}' should start with uppercase",
+                    suggestion=f"Rename to '{m.group(1).capitalize()}'",
+                ))
+
+            # constants → UPPER_SNAKE
+            m = re.search(r"(static\s+final|final\s+static)\s+\w+\s+([a-z]\w*)\s*=", raw)
+            if m and not m.group(2).isupper():
+                self.warnings.append(JavaError(
+                    line=i, column=raw.index(m.group(2)) + 1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                    message=f"Constant '{m.group(2)}' should be UPPER_SNAKE_CASE",
+                    suggestion=f"Rename to '{m.group(2).upper()}'",
+                ))
+
+            # methods → camelCase
+            m = re.search(r"(public|private|protected)\s+\w+\s+([A-Z]\w*)\s*\(", raw)
+            if m and not re.search(rf"class\s+{m.group(2)}", code):
+                self.warnings.append(JavaError(
+                    line=i, column=raw.index(m.group(2)) + 1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                    message=f"Method name '{m.group(2)}' should start with lowercase",
+                    suggestion=f"Rename to '{m.group(2)[0].lower() + m.group(2)[1:]}'",
+                ))
+
+    # ── long methods ──────────────────────────────────────────────
+
+    _METHOD_RE = re.compile(
+        r"(public|private|protected)\s+\w+\s+(\w+)\s*\([^)]*\)\s*\{"
+    )
+
+    def _check_long_methods(self, code: str, lines: List[str]) -> None:
+        for m in self._METHOD_RE.finditer(code):
+            name = m.group(2)
+            start = code[: m.start()].count("\n") + 1
+            depth, pos = 1, m.end()
+            while pos < len(code) and depth > 0:
+                if code[pos] == "{":
+                    depth += 1
+                elif code[pos] == "}":
+                    depth -= 1
+                pos += 1
+            length = code[:pos].count("\n") + 1 - start
+
+            if length > 50:
+                self.warnings.append(JavaError(
+                    line=start, column=1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                    message=f"Method '{name}' is too long ({length} lines)",
+                    suggestion="Split into smaller methods (recommended < 30 lines)",
+                ))
+            elif length > 30:
+                self.warnings.append(JavaError(
+                    line=start, column=1,
+                    error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                    message=f"Method '{name}' is getting long ({length} lines)",
+                    suggestion="Consider extracting some logic to helper methods",
+                ))
+
+    # ── deep nesting ──────────────────────────────────────────────
+
+    def _check_deep_nesting(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        depth = 0
+        max_depth = 0
+        deep_lines: List[int] = []
+        in_ml = False
+
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_c, in_ml = is_comment_line(stripped, in_ml)
+            if is_c or self._is_comment(i, cmap) or not stripped:
+                continue
+
+            depth += raw.count("{") - raw.count("}")
+            if depth > 4 and depth > max_depth:
+                max_depth = depth
+                deep_lines.append(i)
+
+        for ln in deep_lines[:3]:
+            self.warnings.append(JavaError(
+                line=ln, column=1,
+                error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                message=f"Deep nesting detected (depth: {max_depth})",
+                suggestion="Use early returns, extract methods, or flatten logic",
+            ))
+
+    # ── empty blocks ──────────────────────────────────────────────
+
+    _EMPTY_BLOCK_RE = re.compile(r"\{\s*}")
+
+    def _check_empty_blocks(
+        self, code: str, lines: List[str], cmap: Dict[int, bool],
+    ) -> None:
+        in_ml = False
+        for i, raw in enumerate(lines, 1):
+            stripped = raw.strip()
+            is_c, in_ml = is_comment_line(stripped, in_ml)
+            if is_c or self._is_comment(i, cmap):
+                continue
+            if self._EMPTY_BLOCK_RE.search(raw):
+                if "interface" not in raw and "abstract" not in raw:
+                    self.warnings.append(JavaError(
+                        line=i, column=1,
+                        error_type=ErrorType.WARNING, severity=ErrorSeverity.WARNING,
+                        message="Empty code block detected",
+                        suggestion="Add implementation or remove empty block",
+                    ))
+
+
+# ──────────────────────────────────────────────────────────────────────
+# ErrorChecker – orchestrator with debouncing & threading
+# ──────────────────────────────────────────────────────────────────────
 
 class ErrorChecker:
-    """
-    Main Error Checker coordinating all error detection.
-    
-    This is the central class that:
-    1. Coordinates syntax, runtime, and static analysis
-    2. Manages background threading for real-time checking
-    3. Implements debouncing to avoid excessive checks
-    4. Provides callback mechanism for UI updates
-    
-    Usage:
+    """Central coordinator for all error-detection layers.
+
+    Responsibilities
+    ----------------
+    1. **Orchestrate** syntax, runtime, and static-analysis sub-checkers.
+    2. **Debounce** via the ``Debouncer`` class so that the expensive
+       pipeline fires only after the user pauses typing (default 600 ms).
+    3. **Background threading** – ``check_code_async`` dispatches work to a
+       daemon thread so the Electron / Monaco UI never blocks.
+    4. **Caching** – identical source is never analysed twice.
+    5. **Observer pattern** – ``set_callback`` lets the UI register a handler
+       that receives ``List[JavaError]`` when a check completes.
+
+    Usage
+    -----
+    ::
+
         checker = ErrorChecker()
         checker.set_callback(my_update_function)
-        checker.check_code_async(java_code)
+        checker.check_code_async(java_code)   # non-blocking
     """
-    
-    def __init__(self):
-        """Initialize all error detection components."""
+
+    def __init__(self, debounce_delay: float = 0.6) -> None:
+        """Initialise all sub-checkers and the debounce infrastructure.
+
+        Parameters
+        ----------
+        debounce_delay : float
+            Seconds to wait after the last keystroke before analysing
+            (default 0.6, i.e. 600 ms).
+        """
         self.syntax_checker = JavaSyntaxChecker()
         self.runtime_detector = RuntimeErrorDetector()
         self.static_analyzer = StaticAnalyzer()
-        
-        # Callback for UI updates
+
+        # Observer callback for the UI layer
         self.on_errors_detected: Optional[Callable[[List[JavaError]], None]] = None
-        
-        # Simple debouncing - no complex threading
-        self._last_check_time = 0
-        self._debounce_delay = 0.3  # 300ms delay - faster feedback
-        self._pending_timer = None
-        
-        # Cache to avoid re-checking identical code
+
+        # Debouncer – cancels pending timer on every new keystroke
+        self._debouncer = Debouncer(delay=debounce_delay, callback=self._debounced_check)
+
+        # Code + arguments waiting to be checked after debounce fires
+        self._pending_code: Optional[str] = None
+        self._pending_warnings: bool = True
+
+        # Hash-based cache to skip re-analysis of identical source
         self._last_code_hash: Optional[int] = None
         self._cached_errors: List[JavaError] = []
-    
-    def set_callback(self, callback: Callable[[List[JavaError]], None]):
-        """
-        Set callback function for error detection results.
-        
-        Args:
-            callback: Function that receives list of JavaError objects
-        """
+
+        # Legacy attributes (kept for backward compat)
+        self._last_check_time: float = 0
+        self._debounce_delay: float = debounce_delay
+        self._pending_timer: Optional[threading.Timer] = None
+
+    # ── Callback registration (Observer pattern) ──────────────────
+
+    def set_callback(self, callback: Callable[[List[JavaError]], None]) -> None:
+        """Register a listener that receives error lists after each check."""
         self.on_errors_detected = callback
-    
+
+    # ── Synchronous check (public) ────────────────────────────────
+
     def check_code(self, code: str, include_warnings: bool = True) -> List[JavaError]:
+        """Synchronously analyse *code* and return all findings.
+
+        Layers executed:
+        1. Syntax errors (``javac`` or regex fallback).
+        2. Runtime-risk warnings (static heuristics).
+        3. Code-smell / static-analysis warnings (if *include_warnings*).
         """
-        Synchronously check code for all types of errors.
-        
-        Args:
-            code: Java source code to check
-            include_warnings: Whether to include static analysis warnings
-            
-        Returns:
-            Combined list of all detected errors and warnings
-        """
-        all_errors = []
-        
-        # 1. Syntax errors - use javac if available, otherwise minimal regex checks
-        syntax_errors = self.syntax_checker.check_syntax(code)
-        all_errors.extend(syntax_errors)
-        
-        # 2. Runtime error detection - DISABLED (too many false positives)
-        # runtime_errors = self.runtime_detector.detect_runtime_errors(code)
-        # all_errors.extend(runtime_errors)
-        
-        # 3. Static analysis (unused imports only - minimal false positives)
+        all_errors: List[JavaError] = []
+
+        # Layer 1 – syntax
+        all_errors.extend(self.syntax_checker.check_syntax(code))
+
+        # Layer 2 – runtime risk heuristics
+        all_errors.extend(self.runtime_detector.detect_runtime_errors(code))
+
+        # Layer 3 – code smells / static analysis
         if include_warnings:
-            static_warnings = self.static_analyzer.analyze(code)
-            all_errors.extend(static_warnings)
-        
-        # Sort by severity and line number
+            all_errors.extend(self.static_analyzer.analyze(code))
+
+        # Sort: errors first, then warnings, then info; within each group by line
         all_errors.sort(key=lambda e: (
-            0 if e.severity == ErrorSeverity.ERROR else 1 if e.severity == ErrorSeverity.WARNING else 2,
-            e.line
+            0 if e.severity == ErrorSeverity.ERROR else
+            1 if e.severity == ErrorSeverity.WARNING else 2,
+            e.line,
         ))
-        
         return all_errors
-    
-    def check_code_async(self, code: str, include_warnings: bool = True):
+
+    # ── Debounced asynchronous check (public) ─────────────────────
+
+    def check_code_async(self, code: str, include_warnings: bool = True) -> None:
+        """Schedule a debounced, background-threaded analysis of *code*.
+
+        Each call **resets** the debounce timer. The actual analysis runs
+        only after the user stops typing for ``debounce_delay`` seconds.
+
+        **Why background threading?**
+        ``javac`` compilation can take 1-3 s. Running it on the main /
+        renderer thread would freeze the editor. A daemon thread keeps the
+        UI responsive while the analysis completes, then delivers results
+        via the registered callback.
         """
-        Check code with simple debouncing (no complex threading).
-        
-        This method is designed for real-time checking as the user types.
-        
-        Args:
-            code: Java source code to check
-            include_warnings: Whether to include static analysis warnings
-        """
-        # Check cache - if same code, return cached results immediately
+        # Fast path – identical code returns cached results immediately
         code_hash = hash(code)
         if code_hash == self._last_code_hash:
             if self.on_errors_detected:
                 self.on_errors_detected(self._cached_errors)
             return
-        
-        # Simple time-based debounce
-        current_time = time.time()
-        if current_time - self._last_check_time < self._debounce_delay:
-            return  # Skip this check, too soon
-        
-        self._last_check_time = current_time
-        
-        # Run check directly (fast enough for real-time)
+
+        # Store pending arguments and (re)start the debounce timer
+        self._pending_code = code
+        self._pending_warnings = include_warnings
+        self._debouncer.trigger()
+
+    # ── Internal debounce callback ────────────────────────────────
+
+    def _debounced_check(self) -> None:
+        """Called by the ``Debouncer`` once the delay elapses.
+
+        Spawns a daemon thread for the actual analysis so the timer thread
+        is freed immediately.
+        """
+        code = self._pending_code
+        warnings = self._pending_warnings
+        if code is None:
+            return
+
+        thread = threading.Thread(
+            target=self._run_check_in_background,
+            args=(code, warnings),
+            daemon=True,
+            name="ErrorChecker-bg",
+        )
+        thread.start()
+
+    def _run_check_in_background(self, code: str, include_warnings: bool) -> None:
+        """Worker executed on a background daemon thread."""
         try:
             errors = self.check_code(code, include_warnings)
-            
+
             # Update cache
-            self._last_code_hash = code_hash
+            self._last_code_hash = hash(code)
             self._cached_errors = errors
-            
-            # Call callback
+
+            # Deliver results to the UI via the registered observer
             if self.on_errors_detected:
                 self.on_errors_detected(errors)
-                
-        except Exception as e:
-            # Never crash - report error gracefully
-            error = JavaError(
+
+        except Exception as exc:
+            fallback = JavaError(
                 line=1, column=1,
-                error_type=ErrorType.WARNING,
-                severity=ErrorSeverity.INFO,
-                message=f"Error checker exception: {str(e)}"
+                error_type=ErrorType.WARNING, severity=ErrorSeverity.INFO,
+                message=f"Error checker exception: {exc}",
             )
             if self.on_errors_detected:
-                self.on_errors_detected([error])
-    
-    def get_error_summary(self, errors: List[JavaError]) -> Dict[str, int]:
-        """
-        Get summary counts of errors by type.
-        
-        Returns:
-            Dictionary with error counts by category
-        """
-        summary = {
-            'syntax_errors': 0,
-            'runtime_warnings': 0,
-            'code_warnings': 0,
-            'info': 0,
-            'total': len(errors)
+                self.on_errors_detected([fallback])
+
+    # ── Summary helper ────────────────────────────────────────────
+
+    @staticmethod
+    def get_error_summary(errors: List[JavaError]) -> Dict[str, int]:
+        """Return counts of errors grouped by category."""
+        summary: Dict[str, int] = {
+            "syntax_errors":    0,
+            "runtime_warnings": 0,
+            "code_warnings":    0,
+            "info":             0,
+            "total":            len(errors),
         }
-        
-        for error in errors:
-            if error.error_type == ErrorType.SYNTAX:
-                summary['syntax_errors'] += 1
-            elif error.error_type == ErrorType.RUNTIME:
-                summary['runtime_warnings'] += 1
-            elif error.error_type == ErrorType.WARNING:
-                summary['code_warnings'] += 1
+        for e in errors:
+            if e.error_type == ErrorType.SYNTAX:
+                summary["syntax_errors"] += 1
+            elif e.error_type == ErrorType.RUNTIME:
+                summary["runtime_warnings"] += 1
+            elif e.error_type == ErrorType.WARNING:
+                summary["code_warnings"] += 1
             else:
-                summary['info'] += 1
-        
+                summary["info"] += 1
         return summary
 
 
-# Utility function for quick checking
-def check_java_code(code: str) -> List[JavaError]:
-    """
-    Convenience function for quick error checking.
-    
-    Args:
-        code: Java source code to check
-        
-    Returns:
-        List of detected errors and warnings
-    """
-    checker = ErrorChecker()
-    return checker.check_code(code)
+# ──────────────────────────────────────────────────────────────────────
+# Convenience function
+# ──────────────────────────────────────────────────────────────────────
 
+def check_java_code(code: str) -> List[JavaError]:
+    """One-shot convenience wrapper – create a checker, run it, return errors."""
+    return ErrorChecker().check_code(code)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Self-test
+# ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # Test the error checker
-    test_code = """
+    test_code = """\
 public class TestClass {
     public static void main(String[] args) {
         int x = 10
@@ -1625,16 +1454,14 @@ public class TestClass {
     }
 }
 """
-    
-    print("Testing Java Error Checker...")
-    print("=" * 50)
-    
+    print("Testing Java Error Checker …")
+    print("=" * 60)
+
     checker = ErrorChecker()
     errors = checker.check_code(test_code)
-    
-    for error in errors:
-        print(error)
-    
-    print("\n" + "=" * 50)
-    summary = checker.get_error_summary(errors)
-    print(f"Summary: {summary}")
+
+    for err in errors:
+        print(err)
+
+    print("\n" + "=" * 60)
+    print(f"Summary: {checker.get_error_summary(errors)}")

@@ -1,0 +1,79 @@
+CLASS ErrorChecker:
+    syntax_checker = JavaSyntaxChecker()
+    runtime_detector = RuntimeErrorDetector()
+    static_analyzer = StaticAnalyzer()
+    FUNCTION check_code(code):
+        all_errors = []
+        syntax_errors = syntax_checker.check_syntax(code)
+        all_errors.add_all(syntax_errors)
+        runtime_errors = runtime_detector.detect_runtime_errors(code)
+        all_errors.add_all(runtime_errors)
+        static_warnings = static_analyzer.analyze(code)
+        all_errors.add_all(static_warnings)
+        SORT all_errors BY (severity_weight, line)
+        RETURN all_errors
+CLASS JavaSyntaxChecker:
+    FUNCTION check_syntax(code):
+        IF javac_available:
+            temp_file = create_temp_file(code)
+            output = run_javac(temp_file)
+            errors = parse_javac_output(output, code)
+        ELSE:
+            errors = regex_syntax_check(code)
+        RETURN errors
+    FUNCTION regex_syntax_check(code):
+        errors = []
+        lines = split_lines(code)
+        brace_stack = []
+        paren_stack = []
+        FOR i FROM 1 TO len(lines):
+            line = lines[i]
+            FOR j FROM 1 TO len(line):
+                char = line[j]
+                IF char == '{':
+                    brace_stack.push((i, j))
+                ELSE IF char == '}':
+                    IF brace_stack.empty:
+                        errors.add("Unmatched closing brace")
+                    ELSE:
+                        brace_stack.pop()
+        IF line_not_ending_with_semicolon AND not_continued_on_next_line:
+            errors.add("Missing semicolon")
+        RETURN errors
+CLASS RuntimeErrorDetector:
+    FUNCTION detect_runtime_errors(code):
+        errors = []
+        lines = split_lines(code)
+        declared_vars = {}
+        initialized_vars = {}
+        FOR i FROM 1 TO len(lines):
+            line = lines[i]
+            pattern = find_pattern(r'(\w+)\.\w+\(', line)
+            FOR EACH match IN pattern:
+                var = match.group(1)
+                IF var IN declared_vars AND NOT var IN initialized_vars:
+                    errors.add("Potential NullPointerException")
+            array_pattern = find_pattern(r'(\w+)\[(\d+)\]', line)
+            FOR EACH match IN array_pattern:
+                index = int(match.group(2))
+                IF index > 100:
+                    errors.add("Large array index - potential out of bounds")
+            IF pattern_found(r'/\s*0', line):
+                errors.add("Division by zero")
+        RETURN errors
+CLASS StaticAnalyzer:
+    FUNCTION analyze(code):
+        warnings = []
+        imports = find_all_imports(code)
+        FOR EACH import IN imports:
+            IF NOT import_used(import, code):
+                warnings.add("Unused import")
+        class_names = find_all_class_names(code)
+        FOR EACH class_name IN class_names:
+            IF NOT is_pascal_case(class_name):
+                warnings.add("Class should be PascalCase")
+        methods = find_all_methods(code)
+        FOR EACH method IN methods:
+            IF method.line_count > 50:
+                warnings.add("Method too long")
+        RETURN warnings
