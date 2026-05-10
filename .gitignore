@@ -18,6 +18,10 @@ CODE_DOCUMENTATION_FOR_VIVA.md
 node_modules/
 dist/
 
+# Large zip files
+*.zip
+*.msi
+
 # Misc
 *.log
 *.tmp
