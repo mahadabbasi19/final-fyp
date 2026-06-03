@@ -913,14 +913,138 @@ async def rename_symbol(request: RenameSymbolRequest):
 
 # ---------- OpenAI Configuration ----------
 
-_openai_api_key = os.environ.get("OPENAI_API_KEY", "") or "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"
+# ---------------------------------------------------------------------------
+# Per-user OpenAI key resolution
+# ---------------------------------------------------------------------------
+# Resolution order (first non-empty wins):
+#   1. Key passed in the chat request body (`openai_api_key` field).
+#   2. OPENAI_API_KEY environment variable.
+#   3. `.env` file next to main.py (dev convenience).
+#   4. Per-user config file at ~/.codenova/config.json (the "AI Settings"
+#      panel in the IDE writes here).
+# This makes the distributed installer key-less: each end user supplies
+# their own key once via the IDE and we save it under their own home dir.
 
-def _get_openai_client():
-    """Return an OpenAI client."""
+def _user_config_dir() -> Path:
+    return Path.home() / ".codenova"
+
+def _user_config_path() -> Path:
+    return _user_config_dir() / "config.json"
+
+def _read_user_config() -> Dict[str, Any]:
+    p = _user_config_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+def _write_user_config(data: Dict[str, Any]) -> None:
+    d = _user_config_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    _user_config_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Best-effort restrictive perms on Unix-like systems.
+    try:
+        os.chmod(_user_config_path(), 0o600)
+    except Exception:
+        pass
+
+
+def _load_dotenv() -> None:
+    """Optional .env loader for local development. Never required for end users."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+    try:
+        for raw in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and value and key not in os.environ:
+                os.environ[key] = value
+    except Exception:
+        pass
+
+_load_dotenv()
+
+
+def _resolve_openai_key(request_key: Optional[str] = None) -> str:
+    """Return the first key found in priority order. Empty string if none."""
+    if request_key and request_key.strip():
+        return request_key.strip()
+    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    cfg_key = (_read_user_config().get("openai_api_key") or "").strip()
+    return cfg_key
+
+
+def _get_openai_client(request_key: Optional[str] = None):
+    """Return an OpenAI client using whichever key is available."""
     from openai import OpenAI
-    if not _openai_api_key:
-        raise HTTPException(status_code=503, detail="No OpenAI API key available.")
-    return OpenAI(api_key=_openai_api_key)
+    key = _resolve_openai_key(request_key)
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No OpenAI API key configured. Open the IDE's AI Settings panel "
+                "and paste your key — it's saved per-user under ~/.codenova/config.json "
+                "and never shared with anyone else."
+            ),
+        )
+    return OpenAI(api_key=key)
+
+
+# ---------- /config endpoints — manage per-user settings ----------
+
+class OpenAIKeyRequest(BaseModel):
+    openai_api_key: str = Field(..., min_length=1)
+
+
+@app.get("/config/openai-key/status")
+async def openai_key_status():
+    """Tell the UI whether *some* key (env or user config) is configured.
+
+    Never returns the key itself.
+    """
+    key = _resolve_openai_key()
+    return {
+        "configured": bool(key),
+        "source": (
+            "env" if os.environ.get("OPENAI_API_KEY", "").strip()
+            else "user_config" if (_read_user_config().get("openai_api_key") or "").strip()
+            else "none"
+        ),
+    }
+
+
+@app.post("/config/openai-key")
+async def set_openai_key(req: OpenAIKeyRequest):
+    """Save the user's OpenAI key to ~/.codenova/config.json (per-user, never bundled)."""
+    cfg = _read_user_config()
+    cfg["openai_api_key"] = req.openai_api_key.strip()
+    try:
+        _write_user_config(cfg)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to save key: {exc}")
+    return {"success": True, "path": str(_user_config_path())}
+
+
+@app.delete("/config/openai-key")
+async def clear_openai_key():
+    """Remove the saved OpenAI key from per-user config."""
+    cfg = _read_user_config()
+    if "openai_api_key" in cfg:
+        del cfg["openai_api_key"]
+        try:
+            _write_user_config(cfg)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to clear key: {exc}")
+    return {"success": True}
 
 
 # ---------- System Prompt ----------
@@ -999,6 +1123,9 @@ class ChatRequest(BaseModel):
     user_message: str = Field(..., min_length=1, max_length=10000)
     code: Optional[str] = Field(None, max_length=100000)
     file_path: Optional[str] = None
+    # Optional per-request override. The IDE doesn't need to send this if the
+    # key is already saved to ~/.codenova/config.json via /config/openai-key.
+    openai_api_key: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -1022,10 +1149,10 @@ async def chat_with_ai(request: ChatRequest):
     """
     Natural-language assistant endpoint.
 
-    Routing priority (Gemini is NEVER required for refactoring/metrics):
-      1. REFACTORING intent  → local engine  (no LLM)
-      2. METRICS / HEALTH    → local metrics  (no LLM)
-      3. Everything else     → Gemini LLM  (requires API key)
+    Routing priority (the LLM is NEVER required for refactoring/metrics):
+      1. REFACTORING intent  → local engine  (no LLM call)
+      2. METRICS / HEALTH    → local metrics dashboard  (no LLM call)
+      3. Everything else     → OpenAI Chat Completions (requires API key)
     """
     try:
         # --- 1. Analyse provided code (optional) -----------------------
@@ -1083,7 +1210,7 @@ async def chat_with_ai(request: ChatRequest):
             user_parts.append(request.user_message)
             full_user_prompt = "\n\n".join(user_parts)
 
-            client = _get_openai_client()
+            client = _get_openai_client(request_key=request.openai_api_key)
             response = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -1544,11 +1671,13 @@ async def git_stash_list(req: GitRepoRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    # Run with: python main.py
+    # `reload=True` requires passing the app as an import string. With the
+    # `app` object form (used here), uvicorn warns and reload silently fails,
+    # so we keep this entry point reload-off. For dev reload, run:
+    #   python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
     uvicorn.run(
         app,
         host="127.0.0.1",
         port=8000,
-        reload=True,
-        log_level="info"
+        log_level="info",
     )

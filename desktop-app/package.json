@@ -32,8 +32,10 @@
           "**/*.css",
           "**/*.js",
           "__init__.py",
+          ".env",
           "!__pycache__/**",
-          "!*.pyc"
+          "!*.pyc",
+          "!.env.example"
         ]
       }
     ],

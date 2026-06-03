@@ -288,41 +288,114 @@ class JavaASTParser:
     
     def _estimate_method_lines(self, method) -> Tuple[int, int, int]:
         """
-        Estimate the line range of a method.
-        
-        Args:
-            method: Method AST node
-            
-        Returns:
-            Tuple of (start_line, end_line, body_lines)
+        Locate the line range of a method by matching braces in source.
+
+        The original implementation guessed end-line as
+        `start + len(body_statements) + 2`, which propagated wildly wrong
+        sizes into long-method detection and slice extraction. We instead
+        find `start_line` from the AST, then walk the source string with a
+        brace counter (skipping strings/comments) to find the real `}`.
         """
         start_line = method.position.line if method.position else 0
-        
-        # Estimate end line based on body complexity
-        body_lines = 1
-        if method.body:
-            # Count statements in body
-            body_lines = len(method.body) if method.body else 1
-            # Add lines for nested structures
-            for stmt in method.body or []:
-                if isinstance(stmt, (javalang.tree.IfStatement, 
-                                    javalang.tree.ForStatement,
-                                    javalang.tree.WhileStatement)):
-                    body_lines += 2
-                    
-        end_line = start_line + body_lines + 2  # Account for method signature and braces
-        
+        if start_line <= 0 or start_line > len(self.lines):
+            return 0, 0, 0
+
+        end_line = self._find_block_end_line(start_line)
+        body_lines = max(0, end_line - start_line - 1)
         return start_line, end_line, body_lines
+
+    def _find_block_end_line(self, start_line: int) -> int:
+        """
+        Given a 1-indexed line where a Java declaration starts, return the
+        1-indexed line of its closing `}`. Returns `start_line` if no `{` is
+        found on the declaration (e.g. abstract method).
+        """
+        in_block_comment = False
+        in_line_comment = False
+        in_string = False
+        in_char = False
+        escape = False
+        depth = 0
+        seen_open = False
+
+        for line_idx in range(start_line - 1, len(self.lines)):
+            line = self.lines[line_idx]
+            in_line_comment = False
+            i = 0
+            while i < len(line):
+                ch = line[i]
+                nxt = line[i + 1] if i + 1 < len(line) else ''
+
+                if in_line_comment:
+                    break
+                if in_block_comment:
+                    if ch == '*' and nxt == '/':
+                        in_block_comment = False
+                        i += 2
+                        continue
+                    i += 1
+                    continue
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                    i += 1
+                    continue
+                if in_char:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == "'":
+                        in_char = False
+                    i += 1
+                    continue
+
+                if ch == '/' and nxt == '/':
+                    in_line_comment = True
+                    break
+                if ch == '/' and nxt == '*':
+                    in_block_comment = True
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = True
+                    i += 1
+                    continue
+                if ch == "'":
+                    in_char = True
+                    i += 1
+                    continue
+                if ch == '{':
+                    depth += 1
+                    seen_open = True
+                elif ch == '}':
+                    depth -= 1
+                    if seen_open and depth == 0:
+                        return line_idx + 1  # 1-indexed
+                i += 1
+
+            if seen_open and depth == 0:
+                return line_idx + 1
+
+        # No matching close found — declaration is incomplete; fall back to start.
+        return start_line
     
     def _extract_method_info(self, method) -> MethodInfo:
         """
         Extract detailed information about a method.
-        
-        Args:
-            method: Method AST node
-            
-        Returns:
-            MethodInfo object with method details
+
+        Now routes complexity, nesting depth, local-variable extraction, and
+        method-call extraction through the real recursive helpers
+        (`_calculate_complexity`, `_calculate_nesting_depth`,
+        `_extract_local_variables`, `_extract_method_calls`) instead of the
+        previous "top-level statements only" approximations. Those helpers
+        existed but were never called for methods — every metric downstream
+        (MI, radar chart, long-method detection, opportunity ranking) was
+        being driven by an under-counted value.
         """
         params = []
         for param in method.parameters:
@@ -331,35 +404,37 @@ class JavaASTParser:
                 'type': str(param.type.name) if param.type else 'Object'
             }
             params.append(param_info)
-        
+
         return_type = str(method.return_type.name) if method.return_type else "void"
         modifiers = list(method.modifiers) if method.modifiers else []
-        
+
         start_line, end_line, body_lines = self._estimate_method_lines(method)
-        
-        # Create a wrapper to use filter on method body
+
         complexity = 1
         nested_depth = 0
-        local_vars = []
-        method_calls = []
-        
-        if method.body:
-            # Simple complexity estimation based on body structure
-            for stmt in method.body:
-                if isinstance(stmt, javalang.tree.IfStatement):
-                    complexity += 1
-                elif isinstance(stmt, javalang.tree.ForStatement):
-                    complexity += 1
-                elif isinstance(stmt, javalang.tree.WhileStatement):
-                    complexity += 1
-                elif isinstance(stmt, javalang.tree.SwitchStatement):
-                    complexity += len(stmt.cases) if stmt.cases else 0
-                    
-                # Extract local variables
-                if isinstance(stmt, javalang.tree.LocalVariableDeclaration):
-                    for decl in stmt.declarators:
-                        local_vars.append(decl.name)
-        
+        local_vars: List[str] = []
+        method_calls: List[str] = []
+
+        if method.body is not None:
+            # `method` itself is filterable in javalang, so route the whole
+            # subtree through the proper helpers.
+            try:
+                complexity = self._calculate_complexity(method)
+            except Exception:
+                complexity = 1
+            try:
+                nested_depth = self._calculate_nesting_depth(method)
+            except Exception:
+                nested_depth = 0
+            try:
+                local_vars = self._extract_local_variables(method)
+            except Exception:
+                local_vars = []
+            try:
+                method_calls = self._extract_method_calls(method)
+            except Exception:
+                method_calls = []
+
         return MethodInfo(
             name=method.name,
             params=params,
@@ -436,10 +511,15 @@ class JavaASTParser:
                 inner_class = self._extract_class_info(member, depth + 1)
                 inner_classes.append(inner_class)
         
-        # Estimate line range
+        # Real line range via brace matching (was a guess based on method
+        # body lengths, which inflated class size massively).
         start_line = node.position.line if node.position else 0
-        total_lines = sum(m.body_lines + 3 for m in methods) + len(fields) + 5
-        end_line = start_line + total_lines
+        if start_line > 0:
+            end_line = self._find_block_end_line(start_line)
+            total_lines = max(0, end_line - start_line + 1)
+        else:
+            end_line = 0
+            total_lines = 0
         
         return ClassInfo(
             name=name,

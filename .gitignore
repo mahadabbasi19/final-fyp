@@ -25,3 +25,11 @@ dist/
 # Misc
 *.log
 *.tmp
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# macOS
+.DS_Store

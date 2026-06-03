@@ -34,6 +34,9 @@
     contextMenuTarget: null, // for right-click actions
     backendReady: false,     // FastAPI backend status
     errorCheckTimer: null,   // debounce timer for real-time error checking
+    errorCheckInflight: false, // true while a /check-errors request is pending
+    errorCheckSeq: 0,        // request id — drop stale responses
+    errorCheckLastCode: '',  // skip re-checking identical code
     lastAnalysis: null,      // cached analysis result
     lastRefactoring: null,   // cached refactoring result
     graphExpanded: false,    // graph panel expanded/collapsed
@@ -1100,19 +1103,27 @@
     if (!code) return;
     if (!state.backendReady) return;
 
+    // Skip identical content (same code already checked).
+    if (code === state.errorCheckLastCode) return;
+    state.errorCheckLastCode = code;
+
+    const seq = ++state.errorCheckSeq;
+    state.errorCheckInflight = true;
     try {
       const result = await api.backendCheckErrors({ java_code: code });
-
+      // Drop stale responses if user kept typing.
+      if (seq !== state.errorCheckSeq) return;
       if (result.detail) return;
-
       renderProblems(result);
-
     } catch (err) {
       console.warn('Error check failed:', err.message);
+    } finally {
+      if (seq === state.errorCheckSeq) state.errorCheckInflight = false;
     }
   }
 
   // --- Real-time error checking for Java files ---
+  // 350ms debounce — feels near-real-time while staying responsive under load.
   function scheduleErrorCheck() {
     if (state.errorCheckTimer) clearTimeout(state.errorCheckTimer);
     state.errorCheckTimer = setTimeout(() => {
@@ -1120,7 +1131,7 @@
       if (tab && isJavaFile(tab) && state.backendReady) {
         checkErrors();
       }
-    }, 800); // Debounce 800ms
+    }, 350);
   }
 
   // --- Render functions ---
@@ -1953,10 +1964,14 @@
       btn.addEventListener('click', () => {
         const code = btn.closest('.chat-code-block').querySelector('pre').textContent;
         if (state.editor) {
+          const model = state.editor.getModel();
+          const eol = model ? model.getEOL() : '\n';
+          const normalized = code.replace(/\r\n|\r|\n/g, eol);
           const pos = state.editor.getPosition();
           state.editor.executeEdits('chat-insert', [{
             range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
-            text: code + '\n'
+            text: normalized + eol,
+            forceMoveMarkers: true,
           }]);
           state.editor.focus();
         }
@@ -2018,19 +2033,16 @@
     if (!text) return '';
     let html = escapeHtml(text);
 
-    // Code blocks:  ```lang\n...\n```
+    // Normalize line endings so CRLF from the backend doesn't break the regex.
+    html = html.replace(/\r\n/g, '\n');
+
+    // Stash code blocks BEFORE other transforms so the `\n` → `<br>` pass
+    // below cannot clobber newlines inside <pre>. Restore at the end.
+    const codeBlocks = [];
     html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (match, lang, code) => {
-      const langLabel = lang || 'code';
-      return `<div class="chat-code-block">
-        <div class="chat-code-header">
-          <span class="chat-code-lang">${langLabel}</span>
-          <div class="chat-code-actions">
-            <button class="chat-code-copy"><i class="codicon codicon-copy"></i> Copy</button>
-            <button class="chat-code-insert"><i class="codicon codicon-insert"></i> Insert</button>
-          </div>
-        </div>
-        <pre>${code}</pre>
-      </div>`;
+      const placeholder = ` CODEBLOCK${codeBlocks.length} `;
+      codeBlocks.push({ lang: lang || 'code', code });
+      return placeholder;
     });
 
     // Inline code: `..`
@@ -2051,6 +2063,21 @@
     html = html.replace(/\n/g, '<br>');
     html = '<p>' + html + '</p>';
     html = html.replace(/<p><\/p>/g, '');
+
+    // Restore code blocks — newlines inside <pre> are preserved verbatim.
+    html = html.replace(/ CODEBLOCK(\d+) /g, (_, idx) => {
+      const { lang, code } = codeBlocks[Number(idx)];
+      return `<div class="chat-code-block">
+        <div class="chat-code-header">
+          <span class="chat-code-lang">${lang}</span>
+          <div class="chat-code-actions">
+            <button class="chat-code-copy"><i class="codicon codicon-copy"></i> Copy</button>
+            <button class="chat-code-insert"><i class="codicon codicon-insert"></i> Insert</button>
+          </div>
+        </div>
+        <pre>${code}</pre>
+      </div>`;
+    });
 
     return html;
   }
@@ -3112,9 +3139,18 @@
               <input type="text" id="github-repo-url" placeholder="https://github.com/user/repo.git" value="${escapeHtml(savedUrl || '')}" spellcheck="false" />
             </div>
             <div>
+              <label>Personal Access Token <span style="opacity:.6">(required for HTTPS push)</span></label>
+              <input type="password" id="github-token" placeholder="ghp_… — create at github.com/settings/tokens" spellcheck="false" autocomplete="off" />
+              <div style="font-size:11px;opacity:.6;margin-top:4px">Token is sent to the local push script only and is not stored on disk.</div>
+            </div>
+            <div>
               <label>Commit Message</label>
               <input type="text" id="github-commit-msg" placeholder="Update from CodeNova IDE" spellcheck="false" />
             </div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;opacity:.85">
+              <input type="checkbox" id="github-remember-token" />
+              Remember this token for this project (stored in localStorage, plaintext)
+            </label>
           </div>
           <div class="github-modal-footer">
             <button class="github-btn-cancel" id="github-cancel-btn">Cancel</button>
@@ -3127,12 +3163,20 @@
       document.body.appendChild(overlay);
 
       const urlInput = overlay.querySelector('#github-repo-url');
+      const tokenInput = overlay.querySelector('#github-token');
+      const rememberToken = overlay.querySelector('#github-remember-token');
       const msgInput = overlay.querySelector('#github-commit-msg');
       const pushBtn = overlay.querySelector('#github-push-btn');
       const cancelBtn = overlay.querySelector('#github-cancel-btn');
 
+      // Pre-fill token if previously remembered for this project.
+      const savedToken = localStorage.getItem(getRepoUrlKey(state.workspacePath || '') + ':token') || '';
+      if (savedToken) { tokenInput.value = savedToken; rememberToken.checked = true; }
+
       // Focus the right field
-      if (savedUrl) { msgInput.focus(); } else { urlInput.focus(); }
+      if (savedUrl && !savedToken) { tokenInput.focus(); }
+      else if (savedUrl) { msgInput.focus(); }
+      else { urlInput.focus(); }
 
       function cleanup() { overlay.remove(); }
 
@@ -3141,19 +3185,20 @@
         if (e.target === overlay) { cleanup(); resolve(null); }
       });
 
-      // Escape key to close
       function onKey(e) {
         if (e.key === 'Escape') { document.removeEventListener('keydown', onKey); cleanup(); resolve(null); }
-        if (e.key === 'Enter') { pushBtn.click(); }
+        if (e.key === 'Enter' && e.target !== msgInput) { pushBtn.click(); }
       }
       document.addEventListener('keydown', onKey);
 
       pushBtn.addEventListener('click', () => {
         document.removeEventListener('keydown', onKey);
         const repoUrl = urlInput.value.trim();
+        const token = tokenInput.value.trim();
         const commitMessage = msgInput.value.trim() || 'Update from CodeNova IDE';
+        const remember = rememberToken.checked;
         cleanup();
-        resolve({ repoUrl, commitMessage });
+        resolve({ repoUrl, token, commitMessage, remember });
       });
     });
   }
@@ -3170,26 +3215,32 @@
       return;
     }
 
-    // Check localStorage for a saved repo URL for this project
+    // Check localStorage for a saved repo URL + (optionally remembered) token.
     const storageKey = getRepoUrlKey(projectPath);
+    const tokenKey = storageKey + ':token';
     const savedUrl = localStorage.getItem(storageKey) || '';
+    const savedToken = localStorage.getItem(tokenKey) || '';
 
-    let repoUrl, commitMessage;
+    let repoUrl, commitMessage, token;
 
-    if (savedUrl) {
-      // Auto-push: skip modal, use saved URL with default commit message
+    if (savedUrl && savedToken) {
+      // Fully silent auto-push: URL + token already known.
       repoUrl = savedUrl;
+      token = savedToken;
       commitMessage = 'Update from CodeNova IDE — ' + new Date().toLocaleString();
     } else {
-      // First time: show the push modal to get repo URL
+      // Need user input — show modal (pre-fills with whatever we have).
       const input = await showGitHubPushModal(savedUrl);
       if (!input) return; // User cancelled
       repoUrl = input.repoUrl;
+      token = input.token;
       commitMessage = input.commitMessage;
 
-      // Persist the repo URL in localStorage so next push is automatic
-      if (repoUrl) {
-        localStorage.setItem(storageKey, repoUrl);
+      if (repoUrl) localStorage.setItem(storageKey, repoUrl);
+      if (input.remember && token) {
+        localStorage.setItem(tokenKey, token);
+      } else {
+        localStorage.removeItem(tokenKey);
       }
     }
 
@@ -3204,6 +3255,7 @@
         projectPath,
         repoUrl,
         commitMessage,
+        token,
       });
 
       progressEl.remove();

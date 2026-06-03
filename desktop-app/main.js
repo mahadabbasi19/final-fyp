@@ -31,38 +31,86 @@ let nextTerminalId = 1;
 // Java Auto-Detection
 // ---------------------------------------------------------------------------
 function findJavaHome() {
-  // Check JAVA_HOME env first
-  if (process.env.JAVA_HOME && fs.existsSync(path.join(process.env.JAVA_HOME, 'bin', 'javac.exe'))) {
+  const isWin = process.platform === 'win32';
+  const isMac = process.platform === 'darwin';
+  const javacName = isWin ? 'javac.exe' : 'javac';
+
+  // 1. Honour JAVA_HOME if it points at a usable JDK.
+  if (process.env.JAVA_HOME && fs.existsSync(path.join(process.env.JAVA_HOME, 'bin', javacName))) {
     return process.env.JAVA_HOME;
   }
-  // Search common install locations on Windows
-  const searchDirs = [
-    'C:\\Program Files\\Microsoft',
-    'C:\\Program Files\\Java',
-    'C:\\Program Files\\Eclipse Adoptium',
-    'C:\\Program Files\\Zulu',
-    'C:\\Program Files\\Amazon Corretto',
-  ];
+
+  // 2. macOS: ask /usr/libexec/java_home (canonical lookup).
+  if (isMac) {
+    try {
+      const out = require('child_process')
+        .execFileSync('/usr/libexec/java_home', { encoding: 'utf-8', timeout: 2000 })
+        .trim();
+      if (out && fs.existsSync(path.join(out, 'bin', 'javac'))) return out;
+    } catch (_) {}
+  }
+
+  // 3. Platform-specific install roots.
+  const searchDirs = isWin
+    ? [
+        'C:\\Program Files\\Microsoft',
+        'C:\\Program Files\\Java',
+        'C:\\Program Files\\Eclipse Adoptium',
+        'C:\\Program Files\\Zulu',
+        'C:\\Program Files\\Amazon Corretto',
+      ]
+    : isMac
+    ? [
+        '/Library/Java/JavaVirtualMachines',
+        '/opt/homebrew/opt',
+        '/usr/local/opt',
+      ]
+    : [
+        '/usr/lib/jvm',
+        '/usr/java',
+        '/opt/java',
+      ];
+
   for (const dir of searchDirs) {
     if (!fs.existsSync(dir)) continue;
     try {
-      const entries = fs.readdirSync(dir).sort().reverse(); // newest first
+      const entries = fs.readdirSync(dir).sort().reverse(); // newest-looking first
       for (const entry of entries) {
-        const jHome = path.join(dir, entry);
-        if (fs.existsSync(path.join(jHome, 'bin', 'javac.exe')) || fs.existsSync(path.join(jHome, 'bin', 'javac'))) {
-          return jHome;
+        // On macOS the JDK lives under <name>/Contents/Home; check both.
+        const candidates = [
+          path.join(dir, entry),
+          path.join(dir, entry, 'Contents', 'Home'),
+          path.join(dir, entry, 'libexec', 'openjdk.jdk', 'Contents', 'Home'),
+        ];
+        for (const jHome of candidates) {
+          if (fs.existsSync(path.join(jHome, 'bin', javacName))) return jHome;
         }
       }
     } catch (_) {}
   }
+
+  // 4. Last resort: `which javac` (Unix-like).
+  if (!isWin) {
+    try {
+      const out = require('child_process')
+        .execFileSync('which', ['javac'], { encoding: 'utf-8', timeout: 1500 })
+        .trim();
+      if (out) {
+        // Walk up: <javaHome>/bin/javac
+        return path.dirname(path.dirname(out));
+      }
+    } catch (_) {}
+  }
+
   return null;
 }
 
 const JAVA_HOME = findJavaHome();
 if (JAVA_HOME) {
   const javaBin = path.join(JAVA_HOME, 'bin');
-  if (!process.env.PATH.includes(javaBin)) {
-    process.env.PATH = javaBin + ';' + process.env.PATH;
+  const pathSep = process.platform === 'win32' ? ';' : ':';
+  if (!process.env.PATH.split(pathSep).includes(javaBin)) {
+    process.env.PATH = javaBin + pathSep + process.env.PATH;
   }
   process.env.JAVA_HOME = JAVA_HOME;
   console.log('Java detected:', JAVA_HOME);
@@ -611,6 +659,17 @@ ipcMain.handle('backend:chatHealthDashboard', async (event, { java_code }) => {
   return await backendFetch('/chat/health-dashboard', 'POST', { java_code });
 });
 
+// ---- Per-user OpenAI key management ----
+ipcMain.handle('backend:openaiKeyStatus', async () => {
+  return await backendFetch('/config/openai-key/status', 'GET');
+});
+ipcMain.handle('backend:openaiKeySet', async (event, { openai_api_key }) => {
+  return await backendFetch('/config/openai-key', 'POST', { openai_api_key });
+});
+ipcMain.handle('backend:openaiKeyClear', async () => {
+  return await backendFetch('/config/openai-key', 'DELETE');
+});
+
 // ---------------------------------------------------------------------------
 // Git Backend IPC Handlers
 // ---------------------------------------------------------------------------
@@ -675,7 +734,7 @@ ipcMain.handle('backend:gitStashList', async (event, { repo_path }) => {
 // ---------------------------------------------------------------------------
 // Push to GitHub — Standalone Python subprocess
 // ---------------------------------------------------------------------------
-ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMessage }) => {
+ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMessage, token }) => {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, 'backend', 'github_push.py');
 
@@ -685,7 +744,12 @@ ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMes
     }
 
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-    const args = JSON.stringify({ project_path: projectPath, repo_url: repoUrl || '', commit_message: commitMessage || '' });
+    const args = JSON.stringify({
+      project_path: projectPath,
+      repo_url: repoUrl || '',
+      commit_message: commitMessage || '',
+      token: token || '',
+    });
 
     const child = spawn(pythonCmd, [scriptPath, args], {
       cwd: projectPath,

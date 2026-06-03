@@ -178,43 +178,92 @@ class BehaviorPreservationProtocol:
             issues.append("Original code does not parse (javalang AST build failed)")
         return (len(issues) == 0, issues)
 
+    @staticmethod
+    def _strip_strings_and_comments(code: str) -> str:
+        """Remove Java string/char literals and comments.
+
+        Used by structural sanity checks (bracket balance, signature scraping)
+        so that braces inside `String s = "}";` don't trip the safety net.
+        """
+        # Block comments first (greedy-safe with DOTALL).
+        code = re.sub(r'/\*.*?\*/', ' ', code, flags=re.DOTALL)
+        # Line comments.
+        code = re.sub(r'//[^\n]*', ' ', code)
+        # String literals (handles escapes).
+        code = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
+        # Char literals.
+        code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)
+        return code
+
+    _METHOD_SIG_RE = re.compile(
+        r'(?:public|protected|private|static|final|abstract|synchronized|native|default\s+)*\s*'
+        r'(?:<[^>]+>\s+)?'                         # generic parameters
+        r'(?:[\w\<\>\[\],\s\.]+?\s+)?'              # return type (optional for ctors)
+        r'(\w+)\s*\(([^)]*)\)\s*(?:throws[^{;]+)?\s*[{;]'
+    )
+
+    def _scrape_signatures(self, code: str) -> set:
+        """Return a set of (name, arity) tuples for top-level method declarations.
+
+        Best-effort: it's a regex, not a full parser. Used to verify that a
+        refactor didn't accidentally rename or drop a method — anything that
+        shifts the set is rolled back.
+        """
+        cleaned = self._strip_strings_and_comments(code)
+        sigs = set()
+        for m in self._METHOD_SIG_RE.finditer(cleaned):
+            name = m.group(1)
+            params = m.group(2).strip()
+            if name in ('if', 'while', 'for', 'switch', 'catch', 'return', 'synchronized'):
+                continue
+            arity = 0 if not params else len([p for p in params.split(',') if p.strip()])
+            sigs.add((name, arity))
+        return sigs
+
     def post_check(self, original: str, refactored: str) -> Tuple[bool, List[str]]:
         """
-        Compare error counts before/after.  Refactoring must not introduce
-        NEW errors (warnings are tolerated).
+        Verify a refactor preserves behavior to the extent we can check it:
+          1. Bracket balance (on string-and-comment-stripped source).
+          2. javalang re-parse must succeed.
+          3. Public/method signature set must not shrink or rename.
+          4. Static error count must not increase.
         """
-        # Quick bracket balance sanity check
-        open_b = refactored.count('{')
-        close_b = refactored.count('}')
-        if open_b != close_b:
-            return (False, [f"Bracket imbalance: {open_b} open vs {close_b} close braces"])
+        clean = self._strip_strings_and_comments(refactored)
 
-        open_p = refactored.count('(')
-        close_p = refactored.count(')')
-        if open_p != close_p:
-            return (False, [f"Parenthesis imbalance: {open_p} open vs {close_p} close"])
+        # 1. Bracket balance — checked on the stripped source so `"}"` is OK.
+        if clean.count('{') != clean.count('}'):
+            return (False, [f"Bracket imbalance: {clean.count('{')} open vs {clean.count('}')} close braces"])
+        if clean.count('(') != clean.count(')'):
+            return (False, [f"Parenthesis imbalance: {clean.count('(')} open vs {clean.count(')')} close"])
 
-        errors_before = [
-            e for e in self.error_checker.check_code(original, include_warnings=False)
-        ]
-        errors_after = [
-            e for e in self.error_checker.check_code(refactored, include_warnings=False)
-        ]
-        new_errors = []
-        before_msgs = {e.message for e in errors_before}
-        for e in errors_after:
-            if e.message not in before_msgs:
-                new_errors.append(e.message)
-
+        # 2. javalang re-parse — the strongest single signal that the output
+        # is still syntactically valid Java.
         parser = JavaASTParser()
         parser.load_code(refactored)
         try:
             parser.build_ast()
-        except Exception:
-            new_errors.append("Refactored code does not parse (javalang AST build failed)")
+        except Exception as exc:
+            return (False, [f"Refactored code does not parse: {exc}"])
 
-        # Extra check: error count should not increase significantly
-        if len(errors_after) > len(errors_before) + 2:
+        # 3. Signature preservation — refactoring should never drop a method
+        # the original code had. Allow additions (extracted helpers).
+        try:
+            before_sigs = self._scrape_signatures(original)
+            after_sigs = self._scrape_signatures(refactored)
+            removed = before_sigs - after_sigs
+            if removed:
+                examples = ', '.join(f'{n}/{a}' for n, a in list(removed)[:3])
+                return (False, [f"Refactor dropped methods that existed in the original: {examples}"])
+        except Exception:
+            pass  # signature scrape is best-effort; don't block on its own bugs
+
+        # 4. Static error delta.
+        errors_before = self.error_checker.check_code(original, include_warnings=False)
+        errors_after = self.error_checker.check_code(refactored, include_warnings=False)
+        before_msgs = {e.message for e in errors_before}
+        new_errors = [e.message for e in errors_after if e.message not in before_msgs]
+
+        if len(errors_after) > len(errors_before):
             new_errors.append(f"Error count increased from {len(errors_before)} to {len(errors_after)}")
 
         return (len(new_errors) == 0, new_errors)
@@ -548,11 +597,17 @@ class ConditionSimplifier:
     Deterministic, AST-informed.
     """
 
-    _NEGATE_OP = {
-        '==': '!=', '!=': '==',
-        '<': '>=', '>': '<=',
-        '<=': '>', '>=': '<',
-    }
+    # Ordered longest-first so `>=` is matched before `>` and `<=` before `<`.
+    # Using a dict (insertion-ordered, but iteration tested substring first) caused
+    # `a >= b` → `a <= = b` because the `>` rule fired on the leading `>` of `>=`.
+    _NEGATE_OP = [
+        ('==', '!='),
+        ('!=', '=='),
+        ('<=', '>'),
+        ('>=', '<'),
+        ('<', '>='),
+        ('>', '<='),
+    ]
 
     def analyze_conditionals(self, code: str) -> List[Dict]:
         """Return a list of simplification opportunities."""
@@ -671,24 +726,59 @@ class ConditionSimplifier:
     # --- internals ---
 
     def _apply_demorgan(self, expr: str) -> str:
-        """!(A && B) → !A || !B  and  !(A || B) → !A && !B ."""
-        if '&&' in expr:
-            parts = [p.strip() for p in expr.split('&&')]
-            negated = [self._negate_term(p) for p in parts]
-            return ' || '.join(negated)
-        elif '||' in expr:
-            parts = [p.strip() for p in expr.split('||')]
-            negated = [self._negate_term(p) for p in parts]
-            return ' && '.join(negated)
+        """!(A && B) → !A || !B  and  !(A || B) → !A && !B.
+
+        Mixed expressions like `a && b || c` carry implicit precedence that
+        De Morgan can't safely flatten in one pass — we bail out and let the
+        caller leave the original expression untouched.
+        """
+        has_and = '&&' in expr
+        has_or = '||' in expr
+        if has_and and has_or:
+            # Mixed precedence — not safe to rewrite without a real parser.
+            return expr
+        if has_and:
+            parts = self._split_top_level(expr, '&&')
+            return ' || '.join(self._negate_term(p) for p in parts)
+        if has_or:
+            parts = self._split_top_level(expr, '||')
+            return ' && '.join(self._negate_term(p) for p in parts)
         return expr
+
+    def _split_top_level(self, expr: str, sep: str) -> List[str]:
+        """Split `expr` on `sep` only at parenthesis depth 0."""
+        out: List[str] = []
+        depth = 0
+        buf = []
+        i = 0
+        while i < len(expr):
+            ch = expr[i]
+            if ch == '(':
+                depth += 1
+                buf.append(ch)
+            elif ch == ')':
+                depth -= 1
+                buf.append(ch)
+            elif depth == 0 and expr[i:i + len(sep)] == sep:
+                out.append(''.join(buf).strip())
+                buf = []
+                i += len(sep)
+                continue
+            else:
+                buf.append(ch)
+            i += 1
+        if buf:
+            out.append(''.join(buf).strip())
+        return out
 
     def _negate_term(self, term: str) -> str:
         """Negate a single boolean term."""
         term = term.strip()
         if term.startswith('!'):
             return term[1:].strip()
-        # Try to flip comparison operators
-        for op, neg in self._NEGATE_OP.items():
+        # Try to flip comparison operators. _NEGATE_OP is ordered longest-first,
+        # so multi-char ops (>=, <=, ==, !=) win before single-char fallbacks.
+        for op, neg in self._NEGATE_OP:
             if op in term:
                 return term.replace(op, neg, 1)
         return f'!{term}'
@@ -768,12 +858,22 @@ class ConditionSimplifier:
             guard_body = f"{indent}    {else_body[0]}"
             guard_close = f"{indent}}}"
 
-            # Unwrap the if body (remove one level of indentation)
+            # Unwrap the if body — remove one level of indentation. Detects
+            # the inner indent unit from the first non-blank body line instead
+            # of assuming 4 spaces (was broken for tab-indented code).
             if_body_lines = lines[start + 1:if_end]
+            inner_indent = ''
+            for bl in if_body_lines:
+                if bl.strip():
+                    inner_indent = bl[:len(bl) - len(bl.lstrip())]
+                    break
+            step = inner_indent[len(indent):] if inner_indent.startswith(indent) else '    '
+            if not step:
+                step = '    '
             unwrapped = []
             for bl in if_body_lines:
-                if bl.startswith(indent + '    '):
-                    unwrapped.append(indent + bl[len(indent) + 4:])
+                if bl.startswith(indent + step):
+                    unwrapped.append(indent + bl[len(indent) + len(step):])
                 else:
                     unwrapped.append(bl)
 
@@ -791,7 +891,7 @@ class ConditionSimplifier:
             if inner.startswith('(') and inner.endswith(')'):
                 return inner[1:-1]
             return inner
-        for op, neg in self._NEGATE_OP.items():
+        for op, neg in self._NEGATE_OP:
             if f' {op} ' in cond:
                 return cond.replace(f' {op} ', f' {neg} ', 1)
         return f'!({cond})'
@@ -892,95 +992,212 @@ class LoopOptimizer:
 
 class DuplicateDetector:
     """
-    Detects duplicate code blocks using AST-informed similarity analysis.
-    Implements the Rule of Three principle.
+    Detects duplicate code blocks using token-stream normalization.
+
+    Replaces the previous lowercase-whitespace hash, which collapsed
+    `int total = a + b;` and `int sum = x + y;` differently because the
+    identifiers differed. The new tokenizer maps every identifier to `ID`,
+    every numeric literal to `N`, every string to `S`, and every char to
+    `C` — so structurally identical blocks hash to the same fingerprint
+    regardless of names.
     """
 
-    def __init__(self, similarity_threshold: float = 0.85):
+    # Java keywords kept verbatim — they carry semantics.
+    _KEYWORDS = frozenset({
+        'abstract', 'assert', 'boolean', 'break', 'byte', 'case', 'catch',
+        'char', 'class', 'continue', 'default', 'do', 'double', 'else',
+        'enum', 'extends', 'final', 'finally', 'float', 'for', 'if',
+        'implements', 'import', 'instanceof', 'int', 'interface', 'long',
+        'native', 'new', 'null', 'package', 'private', 'protected', 'public',
+        'return', 'short', 'static', 'strictfp', 'super', 'switch',
+        'synchronized', 'this', 'throw', 'throws', 'transient', 'true',
+        'false', 'try', 'void', 'volatile', 'while', 'yield',
+    })
+
+    _RE_STRING = re.compile(r'"(?:[^"\\\n]|\\.)*"')
+    _RE_CHAR = re.compile(r"'(?:[^'\\\n]|\\.)*'")
+    _RE_NUMBER = re.compile(r'\b\d[\d_.eE+\-fFlLdD]*\b')
+    _RE_IDENT = re.compile(r'\b[A-Za-z_$][A-Za-z0-9_$]*\b')
+    _RE_LINE_COMMENT = re.compile(r'//[^\n]*')
+    _RE_BLOCK_COMMENT = re.compile(r'/\*.*?\*/', re.DOTALL)
+
+    def __init__(self, similarity_threshold: float = 0.85, min_block_lines: int = 4):
         self.similarity_threshold = similarity_threshold
+        self.min_block_lines = min_block_lines
+
+    # -------- public API --------
 
     def find_duplicates(self, code_blocks: Dict[str, List[str]]) -> List[Dict]:
         """
         Find duplicate code blocks across methods.
-        
-        Args:
-            code_blocks: {method_name: [lines]}
-        Returns:
-            List of {method1, method2, similarity, lines1, lines2}
+
+        Strategy:
+          1. Tokenise + normalise each method (identifiers→ID, numbers→N, …).
+          2. Hash the token stream for an O(1) exact-match bucket pass.
+          3. Fall back to SequenceMatcher only on small candidate sets that
+             share at least one token n-gram (cheaper than the old O(n²)).
+
+        Caps removed — handles arbitrary method counts.
         """
-        duplicates: List[Dict] = []
         methods = list(code_blocks.items())
+        if len(methods) < 2:
+            return []
 
-        # Performance limits to prevent O(n²) blowup on large codebases
-        max_blocks = min(30, len(methods))
+        fingerprints: List[Tuple[str, List[str], str]] = []
+        for name, lines in methods:
+            tokens = self._tokenize_normalized('\n'.join(lines))
+            if len(tokens) < 8:  # too small to be a meaningful duplicate
+                continue
+            fingerprints.append((name, lines, ' '.join(tokens)))
 
-        for i in range(max_blocks):
-            # Only compare against next 20 blocks
-            for j in range(i + 1, min(i + 20, len(methods))):
-                name1, lines1 = methods[i]
-                name2, lines2 = methods[j]
-                norm1 = self._normalize('\n'.join(lines1))
-                norm2 = self._normalize('\n'.join(lines2))
-                ratio = SequenceMatcher(None, norm1, norm2).ratio()
-                if ratio >= self.similarity_threshold:
+        duplicates: List[Dict] = []
+        seen_pairs: Set[Tuple[str, str]] = set()
+
+        # Exact-fingerprint duplicates first (cheapest, highest confidence).
+        by_hash: Dict[str, List[int]] = defaultdict(list)
+        for idx, (_, _, fp) in enumerate(fingerprints):
+            by_hash[fp].append(idx)
+        for idxs in by_hash.values():
+            if len(idxs) < 2:
+                continue
+            for i in range(len(idxs)):
+                for j in range(i + 1, len(idxs)):
+                    a, b = fingerprints[idxs[i]], fingerprints[idxs[j]]
+                    pair = tuple(sorted([a[0], b[0]]))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
                     duplicates.append({
-                        'method1': name1,
-                        'method2': name2,
-                        'similarity': round(ratio, 3),
-                        'lines1': lines1,
-                        'lines2': lines2,
+                        'method1': a[0],
+                        'method2': b[0],
+                        'similarity': 1.0,
+                        'lines1': a[1],
+                        'lines2': b[1],
                     })
-            # Stop after 5 duplicate groups found
-            if len(duplicates) >= 5:
-                break
+
+        # Near-duplicate pass — restrict to pairs that share an n-gram so we
+        # don't do the full O(n²) similarity matrix.
+        ngram_buckets: Dict[str, List[int]] = defaultdict(list)
+        N = 5
+        for idx, (_, _, fp) in enumerate(fingerprints):
+            toks = fp.split(' ')
+            for k in range(0, max(0, len(toks) - N + 1)):
+                ngram_buckets[' '.join(toks[k:k + N])].append(idx)
+
+        candidate_pairs: Set[Tuple[int, int]] = set()
+        for bucket in ngram_buckets.values():
+            if len(bucket) < 2:
+                continue
+            uniq = sorted(set(bucket))
+            for i in range(len(uniq)):
+                for j in range(i + 1, len(uniq)):
+                    candidate_pairs.add((uniq[i], uniq[j]))
+
+        for i, j in candidate_pairs:
+            a, b = fingerprints[i], fingerprints[j]
+            pair = tuple(sorted([a[0], b[0]]))
+            if pair in seen_pairs:
+                continue
+            ratio = SequenceMatcher(None, a[2], b[2]).ratio()
+            if ratio >= self.similarity_threshold:
+                seen_pairs.add(pair)
+                duplicates.append({
+                    'method1': a[0],
+                    'method2': b[0],
+                    'similarity': round(ratio, 3),
+                    'lines1': a[1],
+                    'lines2': b[1],
+                })
+
+        # Highest similarity first.
+        duplicates.sort(key=lambda d: -d['similarity'])
         return duplicates
 
-    def find_repeated_patterns(self, code: str, min_length: int = 3) -> List[Dict]:
-        """Find repeated code blocks within a single body."""
-        lines = [l.strip() for l in code.split('\n') if l.strip() and not l.strip().startswith('//')]
+    def find_repeated_patterns(self, code: str, min_length: int = 4) -> List[Dict]:
+        """Find repeated structural patterns within a single method/file.
+
+        Slides a `min_length`-line window over the normalised line stream
+        and groups by fingerprint. Catches the "same logic copy-pasted three
+        times" smell even when the variable names were renamed.
+        """
+        raw_lines = code.split('\n')
+        cleaned = []  # (original_line_idx, normalized_tokens_for_line)
+        for idx, ln in enumerate(raw_lines):
+            stripped = ln.strip()
+            if not stripped or stripped.startswith('//'):
+                continue
+            toks = self._tokenize_normalized(stripped)
+            if not toks:
+                continue
+            cleaned.append((idx, ' '.join(toks)))
+
+        if len(cleaned) < min_length * 2:
+            return []
+
+        buckets: Dict[str, List[int]] = defaultdict(list)
+        for start in range(0, len(cleaned) - min_length + 1):
+            fp = ' | '.join(c[1] for c in cleaned[start:start + min_length])
+            buckets[fp].append(start)
+
         patterns: List[Dict] = []
-        seen_hashes: Dict[str, List[int]] = defaultdict(list)
+        for fp, positions in buckets.items():
+            if len(positions) < 2:
+                continue
+            # Non-overlapping occurrences only.
+            non_overlapping = [positions[0]]
+            for p in positions[1:]:
+                if p - non_overlapping[-1] >= min_length:
+                    non_overlapping.append(p)
+            if len(non_overlapping) < 2:
+                continue
+            first = non_overlapping[0]
+            sample_lines = [raw_lines[cleaned[first + k][0]] for k in range(min_length)]
+            patterns.append({
+                'occurrences': len(non_overlapping),
+                'positions': [cleaned[p][0] + 1 for p in non_overlapping],  # 1-indexed
+                'sample': '\n'.join(sample_lines),
+            })
 
-        for start in range(len(lines)):
-            for length in range(min_length, min(20, len(lines) - start + 1)):
-                block = '\n'.join(lines[start:start + length])
-                norm = self._normalize(block)
-                h = hashlib.md5(norm.encode()).hexdigest()
-                seen_hashes[h].append(start)
+        patterns.sort(key=lambda p: (-p['occurrences'], -len(p['sample'])))
+        return patterns
 
-        for h, positions in seen_hashes.items():
-            if len(positions) >= 2:
-                # Deduplicate overlapping positions
-                unique = [positions[0]]
-                for p in positions[1:]:
-                    if p - unique[-1] >= min_length:
-                        unique.append(p)
-                if len(unique) >= 2:
-                    patterns.append({
-                        'occurrences': len(unique),
-                        'positions': unique,
-                        'sample': '\n'.join(lines[unique[0]:unique[0] + min_length]),
-                    })
+    # -------- internals --------
 
-        # Deduplicate by keeping longest patterns
-        patterns.sort(key=lambda p: -len(p['sample']))
-        return patterns[:20]
+    def _tokenize_normalized(self, code: str) -> List[str]:
+        """Produce a structure-preserving token stream from Java source.
 
-    def _normalize(self, code: str) -> str:
-        code = re.sub(r'//.*', '', code)
-        code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
-        code = re.sub(r'\s+', ' ', code)
-        return code.strip().lower()
+        Identifiers → 'ID' (keywords kept), numbers → 'N', strings → 'S',
+        chars → 'C'. Operators and punctuation kept verbatim. Whitespace and
+        comments stripped.
+        """
+        code = self._RE_BLOCK_COMMENT.sub(' ', code)
+        code = self._RE_LINE_COMMENT.sub(' ', code)
+        code = self._RE_STRING.sub(' S ', code)
+        code = self._RE_CHAR.sub(' C ', code)
+        code = self._RE_NUMBER.sub(' N ', code)
 
-    def _calculate_similarity_fast(self, code1: str, code2: str) -> float:
-        """Calculate similarity using fast word-set comparison (Jaccard)."""
-        words1 = set(self._normalize(code1).split())
-        words2 = set(self._normalize(code2).split())
-        if not words1 or not words2:
-            return 0.0
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-        return intersection / union if union > 0 else 0.0
+        # Tokenise: identifiers/keywords + any non-space single char.
+        tokens: List[str] = []
+        i = 0
+        while i < len(code):
+            ch = code[i]
+            if ch.isspace():
+                i += 1
+                continue
+            m = self._RE_IDENT.match(code, i)
+            if m:
+                ident = m.group(0)
+                if ident in self._KEYWORDS:
+                    tokens.append(ident)
+                elif ident in ('S', 'N', 'C', 'ID'):
+                    tokens.append(ident)  # already-normalised marker
+                else:
+                    tokens.append('ID')
+                i = m.end()
+                continue
+            tokens.append(ch)
+            i += 1
+        return tokens
 
 
 class MethodExtractor:
@@ -1119,35 +1336,15 @@ class MethodExtractor:
         return blocks
 
     def _find_statement_chunks(self, method_lines: List[str], method_info: MethodInfo) -> List[Dict]:
-        """Split remaining body into ~max_method_lines chunks."""
-        blocks: List[Dict] = []
-        chunk_size = self.max_method_lines
-        body_start = 1  # skip method signature line
-        body_end = len(method_lines) - 1  # skip closing brace
+        """Disabled — blind N-line slicing breaks brace pairs.
 
-        if body_end - body_start <= chunk_size:
-            return blocks
-
-        i = body_start
-        chunk_num = 1
-        while i < body_end:
-            end = min(i + chunk_size - 1, body_end - 1)
-            chunk_lines = method_lines[i:end + 1]
-            scope = self.scope_analyzer.analyze(
-                method_lines, i, end, method_info
-            )
-            suggested_name = self._suggest_method_name(f'step{chunk_num}', chunk_lines)
-            blocks.append({
-                'suggested_name': suggested_name,
-                'lines': chunk_lines,
-                'start': i,
-                'end': end,
-                'scope_analysis': scope,
-                'reason': f'Statement chunk {chunk_num} (lines {i+1}-{end+1})',
-            })
-            i = end + 1
-            chunk_num += 1
-        return blocks
+        The old behavior split a method body into fixed-size chunks regardless
+        of `{`/`}` boundaries, then handed those chunks to Extract Method,
+        which then emitted syntactically broken Java. We now refuse to
+        suggest chunk-based extractions; comment-delimited and loop-body
+        extractions remain (they respect brace boundaries by construction).
+        """
+        return []
 
     def _find_block_end(self, lines: List[str], start: int) -> int:
         """Find where a logical block ends (next comment or significant break)."""
@@ -1340,21 +1537,15 @@ class ClassSplitter:
     def generate_split_classes(
         self, class_info: ClassInfo, splits: List[Dict]
     ) -> Dict[str, str]:
-        """Generate code for split classes."""
-        result: Dict[str, str] = {}
-        for split in splits:
-            class_code = f'public class {split["name"]} {{\n'
-            for f_name in split.get('fields', []):
-                for fld in class_info.fields:
-                    if fld.name == f_name:
-                        mods = ' '.join(fld.modifiers)
-                        class_code += f'    {mods} {fld.type_name} {fld.name};\n'
-            class_code += '\n'
-            for m_name in split.get('methods', []):
-                class_code += f'    // TODO: Move method {m_name} here\n'
-            class_code += '}\n'
-            result[split['name']] = class_code
-        return result
+        """Disabled — used to emit stubs with `// TODO: Move method X here`.
+
+        Returning real, compilable split classes requires moving method
+        bodies (with their captures and field accesses) across class
+        boundaries — that's behavior-changing surgery a regex layer cannot
+        do safely. Class-split is now suggestion-only: `analyze_class()`
+        still reports cohesion clusters so the user can do the move by hand.
+        """
+        return {}
 
     def _cluster_by_field_access(self, class_info: ClassInfo) -> List[Dict]:
         """Cluster methods by which fields they reference."""

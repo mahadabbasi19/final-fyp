@@ -55,6 +55,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   backendRefactorDecision: (opts) => ipcRenderer.invoke('backend:refactorDecision', opts),
   backendChat: (opts) => ipcRenderer.invoke('backend:chat', opts),
   backendChatHealthDashboard: (opts) => ipcRenderer.invoke('backend:chatHealthDashboard', opts),
+  openaiKeyStatus: () => ipcRenderer.invoke('backend:openaiKeyStatus'),
+  openaiKeySet: (opts) => ipcRenderer.invoke('backend:openaiKeySet', opts),
+  openaiKeyClear: () => ipcRenderer.invoke('backend:openaiKeyClear'),
 
   // --- Git Operations ---
   gitStatus: (opts) => ipcRenderer.invoke('backend:gitStatus', opts),
