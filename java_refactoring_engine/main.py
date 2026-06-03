@@ -1142,6 +1142,47 @@ class HealthDashboardRequest(BaseModel):
     java_code: str
 
 
+# ---------- Chat helpers ----------
+
+# Heuristics for detecting Java in a code fence even when the user typed
+# ```code or ``` instead of ```java.
+_JAVA_SMELL_RE = re.compile(
+    r'\b(public|private|protected|class|interface|void|static|import\s+java\.|'
+    r'System\.out\.print|new\s+\w+\(|@Override)\b'
+)
+
+
+def _extract_java_from_message(message: str) -> str:
+    """Return the largest Java-looking fenced code block in *message*, or ''.
+
+    Used by /chat so a supervisor pasting code in the chat body — not as an
+    attachment — still gets routed to the refactoring engine instead of
+    silently going to the LLM as plain text.
+    """
+    if not message:
+        return ''
+    candidates: List[str] = []
+    for m in re.finditer(r'```([a-zA-Z]*)\s*\n([\s\S]*?)```', message):
+        lang = (m.group(1) or '').lower()
+        body = m.group(2).strip()
+        if not body:
+            continue
+        if lang == 'java':
+            candidates.append(body)
+            continue
+        # No lang tag (or wrong one) — accept if it looks like Java.
+        if not lang and _JAVA_SMELL_RE.search(body):
+            candidates.append(body)
+    if not candidates:
+        # Last resort: the entire message is a Java declaration with no fence.
+        stripped = message.strip()
+        if _JAVA_SMELL_RE.search(stripped) and '{' in stripped and '}' in stripped:
+            return stripped
+        return ''
+    # Pick the longest candidate — usually the actual artefact under review.
+    return max(candidates, key=len)
+
+
 # ---------- /chat Endpoint ----------
 
 @app.post("/chat", response_model=ChatResponse)
@@ -1159,6 +1200,22 @@ async def chat_with_ai(request: ChatRequest):
         metrics_dict: Dict[str, Any] = {}
         dashboard: Optional[Dict[str, Any]] = None
         code = (request.code or "").strip()
+
+        # Scope-breach fix: if no code was attached but the user pasted a
+        # fenced ```java ... ``` block (or any fenced block that smells like
+        # Java) inside the chat message itself, extract it. Supervisors
+        # routinely paste a snippet for review instead of attaching a file.
+        if not code:
+            extracted = _extract_java_from_message(request.user_message)
+            if extracted:
+                code = extracted
+                # Strip the code block from the user_message so the LLM
+                # doesn't see duplicated content (it will see <CODE> tag
+                # below).
+                request.user_message = re.sub(
+                    r'```[a-zA-Z]*\n[\s\S]*?```', '[code block]',
+                    request.user_message,
+                ).strip() or "Refactor / analyze the attached code."
 
         if code:
             parser = JavaASTParser()

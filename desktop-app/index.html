@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://127.0.0.1:8000; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; img-src 'self' data:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' http://127.0.0.1:8000 ws://127.0.0.1:1234 ws://localhost:1234 wss: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' data:; img-src 'self' data:;">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CodeNova IDE</title>
   <link rel="stylesheet" href="styles.css">
@@ -509,6 +509,10 @@
   </div>
 
   <!-- Scripts -->
+  <!-- Collab bundle is built once by `npm run build:collab`; it self-attaches
+       to window.collab. Tag is wrapped in try/catch via onerror so the IDE
+       still works if the bundle is absent (collaboration just stays off). -->
+  <script src="collab/dist/client.bundle.js" onerror="console.info('[collab] bundle not built; run: npm run build:collab')"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

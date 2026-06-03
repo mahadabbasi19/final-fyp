@@ -40,11 +40,70 @@ def run_git(args, cwd):
 
 
 def get_current_branch(cwd):
-    """Detect the current branch name, defaulting to 'main'."""
+    """Detect the current branch name. Returns '' for detached HEAD / empty repo."""
     code, out, _ = run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd)
     if code == 0 and out and out != "HEAD":
         return out
+    return ""
+
+
+def ensure_main_branch(cwd):
+    """
+    GitHub's default branch is `main`. Older `git init` defaults to `master`.
+    Pushing `master` to a fresh GitHub repo creates an orphan branch and the
+    supervisor sees nothing on the default page. Normalize to `main`.
+
+    Returns the final branch name.
+    """
+    current = get_current_branch(cwd)
+    if current == "main":
+        return "main"
+    if current == "master":
+        # Rename in place.
+        code, _, err = run_git(["branch", "-M", "main"], cwd)
+        if code == 0:
+            return "main"
+        # Fall through to current if the rename fails for any reason.
+        return current
+    if current:
+        return current
+    # Empty repo, no commits yet — set the symbolic ref so the first commit
+    # lands on `main`.
+    run_git(["symbolic-ref", "HEAD", "refs/heads/main"], cwd)
     return "main"
+
+
+def ensure_identity(cwd):
+    """
+    A spawned subprocess on a fresh machine has no global git identity, so
+    `git commit` aborts with `please tell me who you are`. Set a repo-local
+    identity (does not touch global config) only if none is configured.
+    """
+    code, out, _ = run_git(["config", "user.email"], cwd)
+    if code == 0 and out.strip():
+        return
+    run_git(["config", "user.email", "codenova-ide@users.noreply.github.com"], cwd)
+    run_git(["config", "user.name", "CodeNova IDE"], cwd)
+
+
+def normalize_repo_url(url: str) -> str:
+    """
+    Tolerate common user mistakes:
+      - trailing slash       → stripped
+      - missing `.git`       → appended for HTTPS GitHub URLs
+      - copy-pasted web URL  → /tree/<branch>/... trimmed back to repo root
+    """
+    if not url:
+        return url
+    url = url.strip().rstrip("/")
+    # Strip `/tree/...` and `/blob/...` paste artifacts.
+    for marker in ("/tree/", "/blob/"):
+        if marker in url:
+            url = url.split(marker, 1)[0]
+    # Append `.git` for HTTPS GitHub URLs that omitted it.
+    if url.startswith(("http://", "https://")) and "github.com/" in url and not url.endswith(".git"):
+        url += ".git"
+    return url
 
 
 def has_remote(cwd, name="origin"):
@@ -100,7 +159,7 @@ def main():
         fail(f"Invalid JSON argument: {e}")
 
     project_path = (params.get("project_path") or "").strip()
-    repo_url = (params.get("repo_url") or "").strip()
+    repo_url = normalize_repo_url((params.get("repo_url") or "").strip())
     commit_message = (params.get("commit_message") or "").strip() or "Update from CodeNova IDE"
     token = (params.get("token") or "").strip()
 
@@ -117,6 +176,12 @@ def main():
         steps.append("Initialized new Git repository")
     else:
         steps.append("Git repository already initialized")
+
+    # Ensure repo-local identity exists so commit doesn't fail on a fresh box.
+    ensure_identity(project_path)
+    # Normalize branch name to `main` (matches GitHub's default).
+    branch_norm = ensure_main_branch(project_path)
+    steps.append(f"Working on branch: {branch_norm or '(unborn)'}")
 
     # ── Step 2: Configure remote origin ─────────────────────────────────
     if repo_url:
@@ -172,7 +237,7 @@ def main():
         steps.append("Nothing to commit — working tree clean")
 
     # ── Step 5: Detect branch & push ────────────────────────────────────
-    branch = get_current_branch(project_path)
+    branch = get_current_branch(project_path) or "main"
     steps.append(f"Pushing branch: {branch}")
 
     # If a token was provided, push to a tokenised URL directly so the

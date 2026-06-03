@@ -220,6 +220,10 @@ class BehaviorPreservationProtocol:
             sigs.add((name, arity))
         return sigs
 
+    # Hard ceiling on how much larger a refactor may make the file. A
+    # legitimate decompose-behavior pass adds maybe 20-30%, never 50%.
+    _MAX_GROWTH_RATIO = 1.5
+
     def post_check(self, original: str, refactored: str) -> Tuple[bool, List[str]]:
         """
         Verify a refactor preserves behavior to the extent we can check it:
@@ -227,7 +231,21 @@ class BehaviorPreservationProtocol:
           2. javalang re-parse must succeed.
           3. Public/method signature set must not shrink or rename.
           4. Static error count must not increase.
+          5. Size invariant: refactored file must not exceed 1.5x original.
+          6. (Optional, best-effort) javac compile-equivalence: if `javac`
+             is on PATH AND the original compiles, the refactored version
+             MUST also compile. We do NOT require equivalent class lists
+             — extract-method legitimately keeps the same single class.
         """
+        # Size invariant — guards against the engine accidentally inlining
+        # something into a runaway expansion.
+        orig_len = max(1, len(original))
+        if len(refactored) > orig_len * self._MAX_GROWTH_RATIO:
+            return (False, [
+                f"Refactored output is {len(refactored) / orig_len:.1f}x larger "
+                f"than the original (max {self._MAX_GROWTH_RATIO}x). Rolling back."
+            ])
+
         clean = self._strip_strings_and_comments(refactored)
 
         # 1. Bracket balance — checked on the stripped source so `"}"` is OK.
@@ -266,7 +284,58 @@ class BehaviorPreservationProtocol:
         if len(errors_after) > len(errors_before):
             new_errors.append(f"Error count increased from {len(errors_before)} to {len(errors_after)}")
 
+        # 5. Best-effort compile-equivalence. If the original compiled with
+        # javac, the refactored must also compile. Skipped silently when
+        # javac is not on PATH (most end-user machines).
+        compile_issue = self._javac_compile_equivalence(original, refactored)
+        if compile_issue:
+            new_errors.append(compile_issue)
+
         return (len(new_errors) == 0, new_errors)
+
+    @staticmethod
+    def _javac_compile_equivalence(original: str, refactored: str) -> Optional[str]:
+        """Compile both versions if javac is available; surface diverging results.
+
+        Returns None on equivalence (or when the check cannot be run).
+        Returns a human-readable rollback reason when the refactor broke a
+        previously-compiling file.
+        """
+        import shutil
+        import subprocess
+        import tempfile
+
+        javac = shutil.which('javac')
+        if not javac:
+            return None  # Tool not installed — can't run the check.
+
+        def _compile(source: str) -> Tuple[bool, str]:
+            # Class name is required to match `javac` expectations.
+            m = re.search(r'\b(?:public\s+)?(?:final\s+)?(?:abstract\s+)?class\s+(\w+)', source)
+            cls = m.group(1) if m else 'Snippet'
+            with tempfile.TemporaryDirectory() as tmp:
+                path = os.path.join(tmp, f'{cls}.java')
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(source)
+                    proc = subprocess.run(
+                        [javac, '-d', tmp, path],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    return proc.returncode == 0, proc.stderr or proc.stdout
+                except subprocess.TimeoutExpired:
+                    return False, 'javac timed out'
+                except Exception as exc:
+                    return False, str(exc)
+
+        orig_ok, _ = _compile(original)
+        if not orig_ok:
+            return None  # Original was already broken — out of scope for this guard.
+        ref_ok, ref_err = _compile(refactored)
+        if not ref_ok:
+            tail = (ref_err or '').strip().splitlines()[-1:] or ['javac error']
+            return f"Refactor broke compilation that worked before: {tail[0][:200]}"
+        return None
 
     def safe_apply(self, original: str, refactored: str) -> Tuple[str, List[str]]:
         """

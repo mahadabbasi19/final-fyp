@@ -117,6 +117,12 @@
               clearTimeout(tab._autoSaveTimer);
               tab._autoSaveTimer = setTimeout(() => saveFile(tab.id), 1000);
             }
+            // In-place mutation fix: any edit invalidates the cached
+            // analysis / refactor plan so the next user-triggered
+            // "Refactor" or "Analyze" runs against the current buffer
+            // instead of replaying a stale plan against new code.
+            state.lastAnalysis = null;
+            state.lastRefactoring = null;
             // Real-time error checking for Java files
             scheduleErrorCheck();
           });
@@ -270,6 +276,9 @@
 
     renderTabs();
 
+    // Attach collaboration binding to this file if we're in a workspace.
+    if (window.codenovaCollab) window.codenovaCollab.bindActiveTab(tab);
+
     // Focus editor so keyboard shortcuts work
     setTimeout(() => state.editor.focus(), 50);
 
@@ -284,6 +293,8 @@
     if (idx === -1) return;
 
     const tab = state.openTabs[idx];
+    // Detach any collaboration binding before disposing the model.
+    if (window.codenovaCollab) window.codenovaCollab.unbindTab(tab);
     // TODO: prompt save if dirty
     tab.model.dispose();
     state.openTabs.splice(idx, 1);
@@ -3294,6 +3305,170 @@
       });
     });
   };
+
+  // =========================================================================
+  // Real-time Collaboration
+  // =========================================================================
+
+  const COLLAB_RELAY_DEFAULT = localStorage.getItem('collab.relayUrl') || 'ws://127.0.0.1:1234';
+
+  function getUsername() {
+    let n = localStorage.getItem('collab.username');
+    if (!n) {
+      n = `User-${Math.random().toString(36).slice(2, 6)}`;
+      localStorage.setItem('collab.username', n);
+    }
+    return n;
+  }
+
+  function initCollabIfPresent() {
+    if (!window.collab) {
+      console.warn('[collab] client.js not loaded; collaboration disabled');
+      return false;
+    }
+    window.collab.init({
+      relayUrl: COLLAB_RELAY_DEFAULT,
+      monacoInstance: window.monaco,
+      username: getUsername(),
+    });
+    window.collab.onPresence(renderPresenceBadge);
+    return true;
+  }
+
+  function renderPresenceBadge(peers) {
+    let el = document.getElementById('collab-presence');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'collab-presence';
+      el.style.cssText = 'position:fixed;top:6px;right:12px;z-index:9000;display:flex;gap:4px;align-items:center;font-size:11px;color:#ddd;background:#252526;padding:3px 8px;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.4)';
+      document.body.appendChild(el);
+    }
+    if (!peers || peers.length === 0) {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = 'flex';
+    el.innerHTML = peers.map((p) =>
+      `<span title="${escapeHtml(p.name)}" style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:${p.color}"></span>${escapeHtml(p.name)}</span>`
+    ).join(' · ');
+  }
+
+  function showShareModal() {
+    if (!initCollabIfPresent()) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'github-modal-overlay';
+    overlay.innerHTML = `
+      <div class="github-modal">
+        <div class="github-modal-header"><i class="codicon codicon-broadcast"></i> Share Workspace</div>
+        <div class="github-modal-body">
+          <div style="font-size:12px;opacity:.7;margin-bottom:8px">Anyone with this token can join your live editing session. Token expires in 7 days.</div>
+          <div>
+            <label>Role granted to invitees</label>
+            <select id="collab-role" style="width:100%;padding:6px;background:#3c3c3c;color:#fff;border:1px solid #555">
+              <option value="editor" selected>Editor (read + write)</option>
+              <option value="viewer">Viewer (read only)</option>
+            </select>
+          </div>
+          <div id="collab-token-result" style="display:none;margin-top:12px">
+            <label>Join token</label>
+            <textarea id="collab-token-text" readonly style="width:100%;height:74px;background:#1e1e1e;color:#9cdcfe;border:1px solid #555;padding:6px;font-family:Menlo,monospace;font-size:11px"></textarea>
+            <button id="collab-copy-token" style="margin-top:6px"><i class="codicon codicon-copy"></i> Copy</button>
+          </div>
+        </div>
+        <div class="github-modal-footer">
+          <button class="github-btn-cancel" id="collab-cancel">Close</button>
+          <button class="github-btn-push" id="collab-generate"><i class="codicon codicon-broadcast"></i> Generate Token</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector('#collab-cancel').onclick = close;
+    overlay.querySelector('#collab-generate').onclick = async () => {
+      try {
+        const role = overlay.querySelector('#collab-role').value;
+        const { token, workspaceId } = await window.collab.shareWorkspace({ role });
+        overlay.querySelector('#collab-token-text').value = token;
+        overlay.querySelector('#collab-token-result').style.display = 'block';
+        showNotification(`Workspace ${workspaceId.slice(0, 8)}… ready to share.`, 'info');
+      } catch (e) {
+        showNotification('Share failed: ' + e.message, 'error');
+      }
+    };
+    overlay.querySelector('#collab-copy-token').onclick = () => {
+      const ta = overlay.querySelector('#collab-token-text');
+      ta.select();
+      document.execCommand('copy');
+      showNotification('Token copied.', 'info');
+    };
+  }
+
+  function showJoinModal() {
+    if (!initCollabIfPresent()) return;
+    const overlay = document.createElement('div');
+    overlay.className = 'github-modal-overlay';
+    overlay.innerHTML = `
+      <div class="github-modal">
+        <div class="github-modal-header"><i class="codicon codicon-link"></i> Join Workspace</div>
+        <div class="github-modal-body">
+          <div>
+            <label>Join token</label>
+            <textarea id="collab-join-token" placeholder="Paste token from your supervisor / teammate" style="width:100%;height:74px;background:#1e1e1e;color:#fff;border:1px solid #555;padding:6px;font-family:Menlo,monospace;font-size:11px"></textarea>
+          </div>
+          <div style="margin-top:8px">
+            <label>Display name (others will see this on cursors)</label>
+            <input type="text" id="collab-display-name" value="${escapeHtml(getUsername())}" style="width:100%;padding:6px;background:#3c3c3c;color:#fff;border:1px solid #555" />
+          </div>
+        </div>
+        <div class="github-modal-footer">
+          <button class="github-btn-cancel" id="collab-cancel">Cancel</button>
+          <button class="github-btn-push" id="collab-join-go"><i class="codicon codicon-link"></i> Join</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const close = () => overlay.remove();
+    overlay.querySelector('#collab-cancel').onclick = close;
+    overlay.querySelector('#collab-join-go').onclick = async () => {
+      try {
+        const name = overlay.querySelector('#collab-display-name').value.trim() || getUsername();
+        localStorage.setItem('collab.username', name);
+        window.collab.init({
+          relayUrl: COLLAB_RELAY_DEFAULT,
+          monacoInstance: window.monaco,
+          username: name,
+        });
+        window.collab.onPresence(renderPresenceBadge);
+        const token = overlay.querySelector('#collab-join-token').value.trim();
+        if (!token) return;
+        const { workspaceId, role } = await window.collab.joinWithToken(token);
+        showNotification(`Joined workspace ${workspaceId.slice(0, 8)}… as ${role}.`, 'info');
+        close();
+      } catch (e) {
+        showNotification('Join failed: ' + e.message, 'error');
+      }
+    };
+  }
+
+  // Public hooks for the activity bar / command palette.
+  window.codenovaCollab = {
+    share: showShareModal,
+    join: showJoinModal,
+    bindActiveTab: (tab) => {
+      if (window.collab && window.collab.isConnected() && tab && tab.path) {
+        const unbind = window.collab.bindEditor(state.editor, tab.path);
+        tab._collabUnbind = unbind;
+      }
+    },
+    unbindTab: (tab) => {
+      if (tab && tab._collabUnbind) {
+        tab._collabUnbind();
+        tab._collabUnbind = null;
+      }
+    },
+  };
+
+  // Optional: wire to buttons if present in the DOM.
+  document.getElementById('btn-collab-share')?.addEventListener('click', showShareModal);
+  document.getElementById('btn-collab-join')?.addEventListener('click', showJoinModal);
 
   // =========================================================================
   // Initialize

@@ -8,8 +8,9 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "rebuild-pty": "electron-rebuild -f -w node-pty",
-    "dist": "electron-builder --win",
-    "dist:dir": "electron-builder --win --dir"
+    "build:collab": "esbuild collab/client.js --bundle --format=iife --target=es2020 --outfile=collab/dist/client.bundle.js",
+    "dist": "npm run build:collab && electron-builder --win",
+    "dist:dir": "npm run build:collab && electron-builder --win --dir"
   },
   "build": {
     "appId": "com.codenova.ide",
@@ -74,7 +75,8 @@
   "devDependencies": {
     "@electron/rebuild": "^3.6.0",
     "electron": "^27.0.0",
-    "electron-builder": "^24.13.3"
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.21.5"
   },
   "dependencies": {
     "@vscode/codicons": "^0.0.36",
@@ -82,6 +84,10 @@
     "node-pty": "^1.0.0",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0",
-    "xterm-addon-web-links": "^0.9.0"
+    "xterm-addon-web-links": "^0.9.0",
+    "yjs": "^13.6.15",
+    "y-monaco": "^0.1.5",
+    "y-websocket": "^2.0.3",
+    "y-protocols": "^1.0.6"
   }
 }
