@@ -195,15 +195,20 @@ class BehaviorPreservationProtocol:
         code = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", code)
         return code
 
+    # Declarations only: require an opening `{` after the parameter list.
+    # Matching `;` as a terminator caught statement-level CALLS like
+    # `System.out.println(1);` and produced false "dropped method println/1"
+    # rollbacks. Abstract/interface methods (ending in `;`) are deliberately
+    # not tracked — missing a check is safer than false rollbacks.
     _METHOD_SIG_RE = re.compile(
         r'(?:public|protected|private|static|final|abstract|synchronized|native|default\s+)*\s*'
         r'(?:<[^>]+>\s+)?'                         # generic parameters
         r'(?:[\w\<\>\[\],\s\.]+?\s+)?'              # return type (optional for ctors)
-        r'(\w+)\s*\(([^)]*)\)\s*(?:throws[^{;]+)?\s*[{;]'
+        r'(\w+)\s*\(([^)]*)\)\s*(?:throws[^{;]+)?\s*\{'
     )
 
     def _scrape_signatures(self, code: str) -> set:
-        """Return a set of (name, arity) tuples for top-level method declarations.
+        """Return a set of (name, arity) tuples for concrete method declarations.
 
         Best-effort: it's a regex, not a full parser. Used to verify that a
         refactor didn't accidentally rename or drop a method — anything that
@@ -213,8 +218,12 @@ class BehaviorPreservationProtocol:
         sigs = set()
         for m in self._METHOD_SIG_RE.finditer(cleaned):
             name = m.group(1)
+            # Skip qualified calls: `obj.method(...) {` can't happen for a
+            # declaration, and the dot means we matched inside an expression.
+            if m.start(1) > 0 and cleaned[m.start(1) - 1] == '.':
+                continue
             params = m.group(2).strip()
-            if name in ('if', 'while', 'for', 'switch', 'catch', 'return', 'synchronized'):
+            if name in ('if', 'while', 'for', 'switch', 'catch', 'return', 'synchronized', 'try', 'do'):
                 continue
             arity = 0 if not params else len([p for p in params.split(',') if p.strip()])
             sigs.add((name, arity))
@@ -224,18 +233,24 @@ class BehaviorPreservationProtocol:
     # legitimate decompose-behavior pass adds maybe 20-30%, never 50%.
     _MAX_GROWTH_RATIO = 1.5
 
-    def post_check(self, original: str, refactored: str) -> Tuple[bool, List[str]]:
+    def post_check(
+        self,
+        original: str,
+        refactored: str,
+        allowed_removals: Optional[Set[str]] = None,
+    ) -> Tuple[bool, List[str]]:
         """
         Verify a refactor preserves behavior to the extent we can check it:
           1. Bracket balance (on string-and-comment-stripped source).
           2. javalang re-parse must succeed.
-          3. Public/method signature set must not shrink or rename.
+          3. Public/method signature set must not shrink or rename —
+             except method names listed in `allowed_removals` (deliberate
+             dead-code eliminations declared by the engine).
           4. Static error count must not increase.
           5. Size invariant: refactored file must not exceed 1.5x original.
           6. (Optional, best-effort) javac compile-equivalence: if `javac`
              is on PATH AND the original compiles, the refactored version
-             MUST also compile. We do NOT require equivalent class lists
-             — extract-method legitimately keeps the same single class.
+             MUST also compile.
         """
         # Size invariant — guards against the engine accidentally inlining
         # something into a runaway expansion.
@@ -264,11 +279,16 @@ class BehaviorPreservationProtocol:
             return (False, [f"Refactored code does not parse: {exc}"])
 
         # 3. Signature preservation — refactoring should never drop a method
-        # the original code had. Allow additions (extracted helpers).
+        # the original code had, EXCEPT methods the engine deliberately
+        # removed (dead-code elimination) which the caller declares via
+        # `allowed_removals`. Additions (extracted helpers) are always fine.
         try:
             before_sigs = self._scrape_signatures(original)
             after_sigs = self._scrape_signatures(refactored)
-            removed = before_sigs - after_sigs
+            removed = {
+                (n, a) for (n, a) in (before_sigs - after_sigs)
+                if n not in (allowed_removals or set())
+            }
             if removed:
                 examples = ', '.join(f'{n}/{a}' for n, a in list(removed)[:3])
                 return (False, [f"Refactor dropped methods that existed in the original: {examples}"])
@@ -301,6 +321,7 @@ class BehaviorPreservationProtocol:
         Returns a human-readable rollback reason when the refactor broke a
         previously-compiling file.
         """
+        import os
         import shutil
         import subprocess
         import tempfile
@@ -337,12 +358,17 @@ class BehaviorPreservationProtocol:
             return f"Refactor broke compilation that worked before: {tail[0][:200]}"
         return None
 
-    def safe_apply(self, original: str, refactored: str) -> Tuple[str, List[str]]:
+    def safe_apply(
+        self,
+        original: str,
+        refactored: str,
+        allowed_removals: Optional[Set[str]] = None,
+    ) -> Tuple[str, List[str]]:
         """
         If post-check passes, return refactored code.
         Otherwise, roll back to original and return warnings.
         """
-        ok, issues = self.post_check(original, refactored)
+        ok, issues = self.post_check(original, refactored, allowed_removals=allowed_removals)
         if ok:
             return refactored, []
         return original, [f"Rolled back — {msg}" for msg in issues]
@@ -555,65 +581,81 @@ class DeadCodeEliminator:
         return dead_items
 
     def eliminate(self, code: str, dead_items: List[Dict]) -> Tuple[str, List[RefactoringAction]]:
-        """Remove dead code and return (new_code, actions)."""
+        """Remove dead code by CHARACTER SPAN and return (new_code, actions).
+
+        The previous implementation removed whole lines, which destroyed any
+        other code sharing a line with the dead member — a one-line class
+        `class A { void dead() {} void live() {} }` lost `live()` too.
+        Character-span removal excises exactly the declaration text.
+        """
         actions: List[RefactoringAction] = []
-        lines = code.split('\n')
-        lines_to_remove: Set[int] = set()
+        spans: List[Tuple[int, int, Dict, str]] = []  # (start, end, item, snippet)
 
         for item in dead_items:
-            line_num = item.get('line', 0)
-            if line_num <= 0 or line_num > len(lines):
-                continue
-
+            name = item['name']
             if item['kind'] == 'field':
-                lines_to_remove.add(line_num - 1)
-                actions.append(RefactoringAction(
-                    action_type='dead_code_removal',
-                    description=f"Removed unused private field '{item['name']}' in {item['class']}",
-                    original_code=lines[line_num - 1].rstrip(),
-                    refactored_code='',
-                    safety_score=1.0,
-                    transformation_type="Deterministic",
-                    class_name=item['class'],
-                    line_start=line_num,
-                    line_end=line_num,
-                ))
+                # Declaration: modifiers .. type .. name [= initializer] ;
+                pat = re.compile(
+                    r'(?:(?:private|protected|public|static|final|transient|volatile)\s+)+'
+                    r'[\w\<\>\[\],\.\s]+?\b' + re.escape(name) + r'\b\s*(?:=[^;]*)?;'
+                )
+                m = pat.search(code)
+                if m:
+                    spans.append((m.start(), m.end(), item, m.group(0)))
             elif item['kind'] == 'method':
-                # Find method extent
-                start_idx = line_num - 1
-                brace_count = 0
-                end_idx = start_idx
-                found_open = False
-                for idx in range(start_idx, len(lines)):
-                    for ch in lines[idx]:
-                        if ch == '{':
-                            brace_count += 1
-                            found_open = True
-                        elif ch == '}':
-                            brace_count -= 1
-                    if found_open and brace_count == 0:
-                        end_idx = idx
-                        break
+                # Signature start: modifiers .. name ( .. ) .. {
+                pat = re.compile(
+                    r'(?:(?:private|protected|public|static|final|synchronized)\s+)+'
+                    r'[\w\<\>\[\],\.\s]*?\b' + re.escape(name) + r'\s*\([^)]*\)\s*(?:throws[^{]+)?\{'
+                )
+                m = pat.search(code)
+                if not m:
+                    continue
+                # Brace-match from the opening `{` to find the method's end.
+                depth = 0
+                end = m.end() - 1
+                i = m.end() - 1
+                while i < len(code):
+                    ch = code[i]
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                    i += 1
+                spans.append((m.start(), end, item, code[m.start():end]))
 
-                original_snippet = '\n'.join(lines[start_idx:end_idx + 1])
-                for r in range(start_idx, end_idx + 1):
-                    lines_to_remove.add(r)
+        if not spans:
+            return code, []
 
-                actions.append(RefactoringAction(
-                    action_type='dead_code_removal',
-                    description=f"Removed unused private method '{item['name']}' in {item['class']}",
-                    original_code=original_snippet,
-                    refactored_code='',
-                    safety_score=1.0,
-                    transformation_type="Deterministic",
-                    class_name=item['class'],
-                    method_name=item['name'],
-                    line_start=line_num,
-                    line_end=end_idx + 1,
-                ))
+        # Remove from the end backwards so earlier offsets stay valid.
+        # Skip overlapping spans (nested/duplicate matches).
+        spans.sort(key=lambda s: -s[0])
+        new_code = code
+        last_start = len(code) + 1
+        for start, end, item, snippet in spans:
+            if end > last_start:
+                continue  # overlaps a span we already removed
+            last_start = start
+            new_code = new_code[:start] + new_code[end:]
+            actions.append(RefactoringAction(
+                action_type='dead_code_removal',
+                description=f"Removed unused private {item['kind']} '{item['name']}' in {item['class']}",
+                original_code=snippet[:300],
+                refactored_code='',
+                safety_score=1.0,
+                transformation_type="Deterministic",
+                class_name=item['class'],
+                method_name=item['name'] if item['kind'] == 'method' else None,
+                line_start=item.get('line', 0),
+                line_end=item.get('line', 0),
+            ))
 
-        new_lines = [l for i, l in enumerate(lines) if i not in lines_to_remove]
-        return '\n'.join(new_lines), actions
+        # Tidy: collapse lines left fully blank by the removal.
+        new_code = re.sub(r'\n[ \t]*\n[ \t]*\n', '\n\n', new_code)
+        return new_code, actions
 
 
 class UnusedImportRemover:
@@ -1913,8 +1955,16 @@ class BehaviorDecomposer:
         extractor = MethodExtractor(self.max_method_lines)
         new_methods_code: List[str] = []
 
+        call_replacements: List[Tuple[str, str]] = []
+
         for resp in responsibilities:
             if len(resp.code_lines) >= self.min_extraction_lines:
+                # Skip blocks whose braces don't balance internally — replacing
+                # them with a call would break the surrounding structure.
+                block_text = '\n'.join(resp.code_lines)
+                if block_text.count('{') != block_text.count('}'):
+                    continue
+
                 method_info_obj = self._dict_to_method_info(target_method)
                 scope = self.scope_analyzer.analyze(
                     method_lines,
@@ -1922,6 +1972,11 @@ class BehaviorDecomposer:
                     resp.end_line - m_start - 1,
                     method_info_obj,
                 )
+                # Blocks needing a wrapper class for multiple out-params are
+                # infeasible for clean extraction.
+                if not scope.feasible:
+                    continue
+
                 candidate = {
                     'suggested_name': resp.suggested_method_name,
                     'lines': resp.code_lines,
@@ -1931,6 +1986,18 @@ class BehaviorDecomposer:
                     code, candidate, target_class['name']
                 )
                 new_methods_code.append(new_method)
+
+                # Record the call-site replacement. Without this, the old
+                # implementation left the original block in place and merely
+                # ADDED the new method — duplicating the logic instead of
+                # moving it.
+                indent = ''
+                for l in resp.code_lines:
+                    if l.strip():
+                        indent = l[:len(l) - len(l.lstrip())]
+                        break
+                call_replacements.append((block_text, f'{indent}{call}'))
+
                 extracted_methods.append({
                     'name': resp.suggested_method_name,
                     'responsibility': resp.responsibility_type,
@@ -1949,16 +2016,27 @@ class BehaviorDecomposer:
         # Check feature envy
         feature_envy = self._detect_feature_envy(target_method)
 
-        # Build refactored code
+        # Build refactored code: replace extracted blocks with calls FIRST,
+        # then append the new methods before the class's closing brace.
+        # Any structural damage is caught downstream by
+        # BehaviorPreservationProtocol.post_check and rolled back.
         refactored_code = code
         if new_methods_code:
-            # Insert new methods before closing brace of class
-            class_end = target_class.get('end_line', len(lines))
-            insert_point = class_end - 1
+            for original_block, call_line in call_replacements:
+                if original_block in refactored_code:
+                    refactored_code = refactored_code.replace(original_block, call_line, 1)
+
+            ref_lines = refactored_code.split('\n')
+            # Insert before the last closing brace (end of the class).
+            insert_point = len(ref_lines) - 1
+            for idx in range(len(ref_lines) - 1, -1, -1):
+                if ref_lines[idx].strip() == '}':
+                    insert_point = idx
+                    break
             for nm in new_methods_code:
-                refactored_lines.insert(insert_point, nm)
+                ref_lines.insert(insert_point, nm)
                 insert_point += 1
-            refactored_code = '\n'.join(refactored_lines)
+            refactored_code = '\n'.join(ref_lines)
 
         return DecompositionResult(
             original_method_name=target_method['name'],
@@ -2427,13 +2505,22 @@ class StructureChanger:
 
         new_classes: List[NewClassDefinition] = []
 
-        # Use suggested_classes from keyword analysis if available
+        # SUGGESTION-ONLY. The previous implementation replaced original
+        # method bodies with delegation calls to generated stub classes whose
+        # methods were empty `// TODO` shells. The result compiled and kept
+        # every signature — so it slipped past every safety check — but every
+        # "moved" method silently became a no-op: a total behavioral
+        # regression. Moving method bodies across class boundaries safely
+        # requires real semantic analysis (field capture, this-references,
+        # visibility) that a regex layer cannot provide. We therefore emit
+        # the split plan (class names, method groupings, rationale) without
+        # touching the source. refactored_code == original_code, always.
         if analysis.get('suggested_classes'):
             for suggestion in analysis['suggested_classes']:
                 new_class = self._generate_new_class(suggestion, code)
+                new_class.code = ''  # plan only — no stub code emitted
                 new_classes.append(new_class)
         else:
-            # Fallback to ClassSplitter field-access clustering
             for cls_analysis in analysis.get('classes', []):
                 if not cls_analysis.get('needs_split'):
                     continue
@@ -2442,52 +2529,40 @@ class StructureChanger:
                     split_result = self.class_splitter.analyze_class(class_info)
                     if not split_result['needs_split']:
                         continue
-                    generated = self.class_splitter.generate_split_classes(
-                        class_info, split_result['suggested_splits']
-                    )
                     for split in split_result['suggested_splits']:
-                        cls_name = split['name']
-                        cls_code = generated.get(cls_name, '')
                         new_classes.append(NewClassDefinition(
-                            name=cls_name,
+                            name=split['name'],
                             responsibility=split.get('reason', ''),
                             fields=split.get('fields', []),
                             methods=split.get('methods', []),
                             original_class=cls['name'],
-                            code=cls_code,
+                            code='',
                         ))
 
-        # Refactor main class with composition + delegation
-        refactored_main = self._refactor_main_class(code, analysis, new_classes)
-
-        # Combine all code
-        generated_class_codes = [nc.code for nc in new_classes if nc.code]
-        all_code = refactored_main
-        if generated_class_codes:
-            all_code += '\n\n' + '\n\n'.join(generated_class_codes)
-
-        coupling_after = CouplingCohesionCalculator.calculate_coupling(refactored_main)
-        cohesion_after = CouplingCohesionCalculator.calculate_cohesion(refactored_main)
-
         explanations = self._generate_explanations(analysis, new_classes)
+        explanations.append(
+            "\nNOTE: Change Structure is advisory — the plan above shows how to "
+            "split the class, but the source is left untouched so behavior is "
+            "guaranteed to be preserved. Apply the moves manually or with your "
+            "IDE's Move Method refactoring."
+        )
 
         principles = [
-            "Behavior Preservation - External behavior unchanged",
-            "Single Responsibility Principle (SRP) - Each class has one responsibility",
-            "Separation of Concerns - Different concerns in different classes",
-            "High Cohesion - Related methods grouped together",
-            "Low Coupling - Minimal dependencies between classes",
+            "Behavior Preservation - source is never modified by Change Structure",
+            "Single Responsibility Principle (SRP) - each suggested class has one responsibility",
+            "Separation of Concerns - different concerns in different classes",
+            "High Cohesion / Low Coupling - methods grouped by shared data access",
         ]
 
         return StructuralRefactoringResult(
             success=len(new_classes) > 0,
             original_code=code,
-            refactored_code=all_code,
+            refactored_code=code,   # advisory: never mutate
             new_classes=new_classes,
             coupling_before=coupling_before,
-            coupling_after=coupling_after,
+            coupling_after=coupling_before,
             cohesion_before=cohesion_before,
-            cohesion_after=cohesion_after,
+            cohesion_after=cohesion_before,
             explanations=explanations,
             principles_applied=principles,
         )
@@ -2907,6 +2982,10 @@ class JavaRefactoringEngine:
         refactored_code = code
         warnings: List[str] = []
         errors: List[str] = []
+        # Method names deliberately removed (dead-code elimination). Passed
+        # to the signature-preservation guard so it doesn't roll back
+        # intentional removals while still catching accidental ones.
+        deliberate_removals: Set[str] = set()
 
         refactoring_types = selected_refactorings or []
         if apply_all:
@@ -2925,6 +3004,9 @@ class JavaRefactoringEngine:
                     refactored_code
                 )
                 actions.extend(dead_actions)
+                deliberate_removals.update(
+                    a.method_name for a in dead_actions if a.method_name
+                )
 
             if 'unused_import_removal' in refactoring_types:
                 refactored_code, import_actions = self.unused_import_remover.remove(
@@ -3000,7 +3082,8 @@ class JavaRefactoringEngine:
             # ---- Behavior Preservation Final Check ----
             if actions:
                 refactored_code, bp_warnings = self.behavior_protocol.safe_apply(
-                    code, refactored_code
+                    code, refactored_code,
+                    allowed_removals=deliberate_removals,
                 )
                 warnings.extend(bp_warnings)
                 if bp_warnings:
@@ -3167,56 +3250,60 @@ class JavaRefactoringEngine:
     def _apply_duplicate_removal(
         self, code: str
     ) -> Tuple[str, List[RefactoringAction]]:
-        """Detect and suggest removal of duplicate code blocks."""
+        """Detect duplicate methods and repeated in-body patterns.
+
+        DETECTION + REPORTING ONLY — the source is never modified here.
+        The previous implementation generated a `commonOperationN()` method
+        containing a *copy* of the duplicated code but never replaced the
+        original occurrences with calls, so "remove duplicates" actually
+        added a third copy (with out-of-scope variables to boot). True clone
+        elimination needs call-site rewriting plus parameterization of the
+        differing identifiers — and removing a whole duplicate method would
+        (correctly) be blocked by the signature-preservation guard anyway.
+        We report each clone pair precisely so the user can merge them.
+        """
         actions: List[RefactoringAction] = []
         parser = JavaASTParser()
         parser.load_code(code)
         try:
             parser.build_ast()
+            parser.extract_all()
             code_blocks = parser.get_code_blocks()
         except Exception:
             return code, []
 
         duplicates = self.duplicate_detector.find_duplicates(code_blocks)
-        repeated = self.duplicate_detector.find_repeated_patterns(code)
-
-        refactored_code = code
-
-        # Extract common duplicate blocks into shared methods
-        method_counter = 1
-        for dup in duplicates[:5]:
-            common_lines = dup['lines1']
-            common_code = '\n'.join(common_lines)
-            method_name = f'commonOperation{method_counter}'
-
-            # Create the shared method
-            body = '\n'.join(f'        {l.strip()}' for l in common_lines if l.strip())
-            new_method = f'\n    private void {method_name}() {{\n{body}\n    }}\n'
-
+        for dup in duplicates[:10]:
+            exact = dup['similarity'] >= 0.999
             actions.append(RefactoringAction(
                 action_type='remove_duplicates',
                 description=(
-                    f"Extracted duplicate code from '{dup['method1']}' and "
-                    f"'{dup['method2']}' into '{method_name}' "
-                    f"(similarity: {dup['similarity']:.0%})"
+                    f"{'Exact' if exact else 'Near'} duplicate: '{dup['method1']}' and "
+                    f"'{dup['method2']}' share {dup['similarity']:.0%} of their structure. "
+                    f"{'Delete one and redirect its callers.' if exact else 'Extract the shared logic into a common helper.'}"
                 ),
-                original_code=common_code[:200],
-                refactored_code=f'{method_name}();',
+                original_code='\n'.join(dup['lines1'])[:400],
+                refactored_code='',   # advisory — no automatic rewrite
                 safety_score=0.75,
-                transformation_type="AI-Suggested",
+                transformation_type="Suggestion",
             ))
-            method_counter += 1
 
-            # Insert shared method at end of first class
-            ref_lines = refactored_code.split('\n')
-            # Find last closing brace
-            for idx in range(len(ref_lines) - 1, -1, -1):
-                if ref_lines[idx].strip() == '}':
-                    ref_lines.insert(idx, new_method)
-                    break
-            refactored_code = '\n'.join(ref_lines)
+        # Repeated in-body patterns (same lines pasted 2+ times in one method)
+        repeated = self.duplicate_detector.find_repeated_patterns(code)
+        for pat in repeated[:5]:
+            actions.append(RefactoringAction(
+                action_type='remove_duplicates',
+                description=(
+                    f"Repeated block ({pat['occurrences']}x, at lines "
+                    f"{', '.join(str(p) for p in pat['positions'][:4])}) — extract into a helper method"
+                ),
+                original_code=pat['sample'][:400],
+                refactored_code='',
+                safety_score=0.75,
+                transformation_type="Suggestion",
+            ))
 
-        return refactored_code, actions
+        return code, actions
 
     def _apply_behavior_decomposition(
         self, code: str

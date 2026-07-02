@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+javalang>=0.13
+gitpython>=3.1
+openai>=1.20

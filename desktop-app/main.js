@@ -17,6 +17,10 @@ let pty;
 let backendProcess = null;
 const BACKEND_PORT = 8000;
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
+// Per-launch shared secret. The backend rejects any request that doesn't
+// echo this in X-CodeNova-Token, so a malicious webpage in the user's
+// browser cannot drive the local API (rename-symbol, git push, etc).
+const BACKEND_AUTH_TOKEN = require('crypto').randomBytes(32).toString('hex');
 
 try {
   pty = require('node-pty');
@@ -89,15 +93,18 @@ function findJavaHome() {
     } catch (_) {}
   }
 
-  // 4. Last resort: `which javac` (Unix-like).
+  // 4. Last resort: `which javac` (Unix-like). macOS ships a /usr/bin/javac
+  // STUB that exists even without a JDK and prints "Unable to locate a Java
+  // Runtime" — so verify it actually runs before trusting it.
   if (!isWin) {
     try {
-      const out = require('child_process')
-        .execFileSync('which', ['javac'], { encoding: 'utf-8', timeout: 1500 })
-        .trim();
+      const cp = require('child_process');
+      const out = cp.execFileSync('which', ['javac'], { encoding: 'utf-8', timeout: 1500 }).trim();
       if (out) {
-        // Walk up: <javaHome>/bin/javac
-        return path.dirname(path.dirname(out));
+        const check = cp.spawnSync(out, ['-version'], { encoding: 'utf-8', timeout: 3000 });
+        if (check.status === 0) {
+          return path.dirname(path.dirname(out));
+        }
       }
     } catch (_) {}
   }
@@ -128,6 +135,20 @@ function getBackendDir() {
   return path.join(process.resourcesPath, 'java_refactoring_engine');
 }
 
+function getBundledBackendBinary() {
+  // Standalone PyInstaller binary — end users need NO Python installed.
+  // Checked first in production, then in dev (if the developer built it).
+  const name = process.platform === 'win32' ? 'codenova-backend.exe' : 'codenova-backend';
+  const candidates = [
+    path.join(process.resourcesPath || '', 'backend-bin', name),
+    path.join(__dirname, '..', 'java_refactoring_engine', 'dist', name),
+  ];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch (_) {}
+  }
+  return null;
+}
+
 function killPortProcess(port) {
   return new Promise((resolve) => {
     if (process.platform === 'win32') {
@@ -147,30 +168,50 @@ function startBackend() {
     // Kill any stale process on our port first
     await killPortProcess(BACKEND_PORT);
 
-    const backendDir = getBackendDir();
-    const mainPy = path.join(backendDir, 'main.py');
+    // Preferred: standalone PyInstaller binary — works with no Python
+    // installed, exactly like VS Code's bundled runtime model.
+    const bundledBinary = getBundledBackendBinary();
 
-    if (!fs.existsSync(mainPy)) {
-      console.warn('Backend main.py not found at:', mainPy);
-      resolve(false);
-      return;
+    if (bundledBinary) {
+      console.log('Starting bundled backend binary:', bundledBinary);
+      backendProcess = spawn(bundledBinary, [], {
+        cwd: path.dirname(bundledBinary),
+        env: {
+          ...process.env,
+          CODENOVA_BACKEND_PORT: String(BACKEND_PORT),
+          CODENOVA_AUTH_TOKEN: BACKEND_AUTH_TOKEN,
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+    } else {
+      // Fallback: source + system Python (development machines).
+      const backendDir = getBackendDir();
+      const mainPy = path.join(backendDir, 'main.py');
+
+      if (!fs.existsSync(mainPy)) {
+        console.warn('Backend main.py not found at:', mainPy);
+        resolve(false);
+        return;
+      }
+
+      console.log('Starting FastAPI backend from source:', backendDir);
+      const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
+
+      backendProcess = spawn(pythonCmd, [
+        '-m', 'uvicorn', 'main:app',
+        '--host', '127.0.0.1',
+        '--port', String(BACKEND_PORT),
+        '--log-level', 'info'
+      ], {
+        cwd: backendDir,
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: '1',
+          CODENOVA_AUTH_TOKEN: BACKEND_AUTH_TOKEN,
+        },
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
     }
-
-    console.log('Starting FastAPI backend from:', backendDir);
-
-    // Find python executable
-    const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-
-    backendProcess = spawn(pythonCmd, [
-      '-m', 'uvicorn', 'main:app',
-      '--host', '127.0.0.1',
-      '--port', String(BACKEND_PORT),
-      '--log-level', 'info'
-    ], {
-      cwd: backendDir,
-      env: { ...process.env, PYTHONUNBUFFERED: '1' },
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
 
     let started = false;
 
@@ -498,6 +539,12 @@ ipcMain.on('terminal:kill', (event, { id }) => {
 // IPC Handlers — Run / Execute File
 // ---------------------------------------------------------------------------
 ipcMain.handle('run:file', async (event, { filePath, cwd }) => {
+  // The command strings below are interpolated into a shell (PowerShell on
+  // Windows). A filename like `x"; rm -rf ~; "` would execute. Escaping
+  // PowerShell quoting correctly is a losing game — reject instead.
+  if (/["'`$;|&<>\n\r]/.test(filePath)) {
+    throw new Error('File path contains characters that cannot be run safely (quotes, $, ;, |, &). Rename the file and try again.');
+  }
   const ext = path.extname(filePath).toLowerCase();
   const commands = {
     '.py': `python "${filePath}"`,
@@ -596,6 +643,7 @@ async function backendFetch(endpoint, method, body) {
       method: method,
       headers: {
         'Content-Type': 'application/json',
+        'X-CodeNova-Token': BACKEND_AUTH_TOKEN,
         ...(postData ? { 'Content-Length': Buffer.byteLength(postData) } : {})
       },
       timeout: 30000
@@ -729,6 +777,63 @@ ipcMain.handle('backend:gitStashPop', async (event, { repo_path }) => {
 });
 ipcMain.handle('backend:gitStashList', async (event, { repo_path }) => {
   return await backendFetch('/git/stash/list', 'POST', { repo_path });
+});
+
+// ---------------------------------------------------------------------------
+// GitHub OAuth Device Flow — "Sign in with GitHub" (like VS Code)
+// ---------------------------------------------------------------------------
+// Requires a (free) GitHub OAuth App with Device Flow enabled:
+//   github.com/settings/developers → New OAuth App → any callback URL →
+//   tick "Enable Device Flow" → copy the Client ID below.
+// The client ID is public by design (no secret is used in device flow).
+const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || 'REPLACE_WITH_OAUTH_APP_CLIENT_ID';
+
+ipcMain.handle('github:deviceStart', async () => {
+  if (GITHUB_CLIENT_ID.startsWith('REPLACE_')) {
+    return { error: 'GitHub OAuth App not configured. Set GITHUB_CLIENT_ID in main.js (see comment above it).' };
+  }
+  const res = await fetch('https://github.com/login/device/code', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: 'repo' }),
+  });
+  if (!res.ok) return { error: `GitHub returned ${res.status}` };
+  const data = await res.json();
+  // { device_code, user_code, verification_uri, expires_in, interval }
+  return data;
+});
+
+ipcMain.handle('github:deviceWait', async (event, { device_code, interval }) => {
+  const pollMs = Math.max(5, interval || 5) * 1000;
+  const deadline = Date.now() + 10 * 60 * 1000; // give the user 10 minutes
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    const res = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_id: GITHUB_CLIENT_ID,
+        device_code,
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+      }),
+    });
+    const data = await res.json();
+    if (data.access_token) {
+      // Fetch the username so the UI can show who is signed in.
+      let login = '';
+      try {
+        const who = await fetch('https://api.github.com/user', {
+          headers: { Authorization: `Bearer ${data.access_token}`, Accept: 'application/vnd.github+json' },
+        });
+        if (who.ok) login = (await who.json()).login || '';
+      } catch (_) {}
+      return { token: data.access_token, login };
+    }
+    if (data.error === 'authorization_pending') continue;
+    if (data.error === 'slow_down') { await new Promise((r) => setTimeout(r, 5000)); continue; }
+    return { error: data.error_description || data.error || 'Authorization failed' };
+  }
+  return { error: 'Timed out waiting for GitHub authorization.' };
 });
 
 // ---------------------------------------------------------------------------

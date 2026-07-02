@@ -33,3 +33,7 @@ dist/
 
 # macOS
 .DS_Store
+
+# PyInstaller
+java_refactoring_engine/build/
+java_refactoring_engine/.venv/

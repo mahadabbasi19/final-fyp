@@ -56,14 +56,38 @@ app = FastAPI(
     version="1.1.0"
 )
 
-# Enable CORS for VSCodium communication
+# CORS: the only legitimate caller is the Electron main process (Node http,
+# no Origin header) and the renderer served from file:// (Origin: "null").
+# Browsers visiting a malicious page send their page's Origin — not allowed.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (localhost in production)
-    allow_credentials=True,
+    allow_origins=["null", "file://"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Shared-secret auth: Electron generates a random token at spawn and passes it
+# via the CODENOVA_AUTH_TOKEN env var. Every request must echo it back in the
+# X-CodeNova-Token header. When the env var is unset (developer running
+# uvicorn by hand), auth is disabled so curl-based testing keeps working.
+_AUTH_TOKEN = os.environ.get("CODENOVA_AUTH_TOKEN", "").strip()
+
+
+@app.middleware("http")
+async def _require_auth_token(request, call_next):
+    if _AUTH_TOKEN:
+        # /health stays open so process supervisors can probe liveness.
+        if request.url.path != "/health":
+            supplied = request.headers.get("x-codenova-token", "")
+            if supplied != _AUTH_TOKEN:
+                from starlette.responses import JSONResponse
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Missing or invalid X-CodeNova-Token header."},
+                )
+    return await call_next(request)
 
 
 # ==================== Pydantic Models ====================
@@ -952,22 +976,25 @@ def _write_user_config(data: Dict[str, Any]) -> None:
 
 
 def _load_dotenv() -> None:
-    """Optional .env loader for local development. Never required for end users."""
-    env_path = Path(__file__).parent / ".env"
-    if not env_path.exists():
-        return
-    try:
-        for raw in env_path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and value and key not in os.environ:
-                os.environ[key] = value
-    except Exception:
-        pass
+    """Optional .env loader. Checks the module dir (dev / PyInstaller bundle)
+    and the current working directory (a .env placed next to the frozen
+    binary — lets users rotate the key without rebuilding)."""
+    candidates = [Path(__file__).parent / ".env", Path.cwd() / ".env"]
+    for env_path in candidates:
+        if not env_path.exists():
+            continue
+        try:
+            for raw in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and value and key not in os.environ:
+                    os.environ[key] = value
+        except Exception:
+            pass
 
 _load_dotenv()
 
@@ -1472,8 +1499,9 @@ async def chat_health_dashboard(request: HealthDashboardRequest):
 # GIT ENDPOINTS
 # ========================================================================
 
-# Singleton git manager – repo is opened per request via repo_path
-_git_mgr = GitManager()
+# Git managers are created per request. The previous module-level singleton
+# raced when the UI's status poll and a commit arrived concurrently — both
+# calls mutated the same `_repo` attribute mid-flight.
 
 
 class GitRepoRequest(BaseModel):
@@ -1547,10 +1575,9 @@ class GitStashRequest(BaseModel):
 
 
 def _open_git(repo_path: str) -> GitManager:
-    """Open a repo on the singleton GitManager, return it."""
+    """Return a fresh, request-scoped GitManager for *repo_path*."""
     try:
-        _git_mgr.open(repo_path)
-        return _git_mgr
+        return GitManager(repo_path)
     except NotARepoError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1559,7 +1586,7 @@ def _open_git(repo_path: str) -> GitManager:
 async def git_init(req: GitInitRequest):
     """Initialise a new Git repository."""
     try:
-        return _git_mgr.init_repo(req.path)
+        return GitManager().init_repo(req.path)
     except GitManagerError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

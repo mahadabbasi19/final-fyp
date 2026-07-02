@@ -3150,9 +3150,13 @@
               <input type="text" id="github-repo-url" placeholder="https://github.com/user/repo.git" value="${escapeHtml(savedUrl || '')}" spellcheck="false" />
             </div>
             <div>
-              <label>Personal Access Token <span style="opacity:.6">(required for HTTPS push)</span></label>
+              <label>GitHub Account</label>
+              <div id="github-signin-row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+                <button id="github-signin-btn" style="display:flex;align-items:center;gap:6px"><i class="codicon codicon-github"></i> Sign in with GitHub</button>
+                <span id="github-signin-status" style="font-size:12px;opacity:.8"></span>
+              </div>
+              <label style="font-size:11px;opacity:.7">…or paste a Personal Access Token manually</label>
               <input type="password" id="github-token" placeholder="ghp_… — create at github.com/settings/tokens" spellcheck="false" autocomplete="off" />
-              <div style="font-size:11px;opacity:.6;margin-top:4px">Token is sent to the local push script only and is not stored on disk.</div>
             </div>
             <div>
               <label>Commit Message</label>
@@ -3180,9 +3184,40 @@
       const pushBtn = overlay.querySelector('#github-push-btn');
       const cancelBtn = overlay.querySelector('#github-cancel-btn');
 
-      // Pre-fill token if previously remembered for this project.
+      // Pre-fill token: prefer a GitHub sign-in token, else a remembered PAT.
+      const oauthToken = localStorage.getItem('github.oauthToken') || '';
+      const oauthLogin = localStorage.getItem('github.oauthLogin') || '';
       const savedToken = localStorage.getItem(getRepoUrlKey(state.workspacePath || '') + ':token') || '';
-      if (savedToken) { tokenInput.value = savedToken; rememberToken.checked = true; }
+      const statusEl = overlay.querySelector('#github-signin-status');
+      if (oauthToken) {
+        tokenInput.value = oauthToken;
+        statusEl.textContent = `Signed in as ${oauthLogin || 'GitHub user'} ✓`;
+      } else if (savedToken) {
+        tokenInput.value = savedToken;
+        rememberToken.checked = true;
+      }
+
+      // Device-flow sign-in: show the code, open the browser, wait for grant.
+      overlay.querySelector('#github-signin-btn').addEventListener('click', async () => {
+        const btn = overlay.querySelector('#github-signin-btn');
+        btn.disabled = true;
+        statusEl.textContent = 'Contacting GitHub…';
+        try {
+          const start = await api.githubDeviceStart();
+          if (start.error) { statusEl.textContent = start.error; btn.disabled = false; return; }
+          statusEl.innerHTML = `Enter code <b style="font-family:monospace">${escapeHtml(start.user_code)}</b> in the browser…`;
+          api.openExternal(start.verification_uri);
+          const result = await api.githubDeviceWait({ device_code: start.device_code, interval: start.interval });
+          if (result.error) { statusEl.textContent = result.error; btn.disabled = false; return; }
+          localStorage.setItem('github.oauthToken', result.token);
+          if (result.login) localStorage.setItem('github.oauthLogin', result.login);
+          tokenInput.value = result.token;
+          statusEl.textContent = `Signed in as ${result.login || 'GitHub user'} ✓`;
+        } catch (e) {
+          statusEl.textContent = 'Sign-in failed: ' + e.message;
+          btn.disabled = false;
+        }
+      });
 
       // Focus the right field
       if (savedUrl && !savedToken) { tokenInput.focus(); }
@@ -3230,7 +3265,9 @@
     const storageKey = getRepoUrlKey(projectPath);
     const tokenKey = storageKey + ':token';
     const savedUrl = localStorage.getItem(storageKey) || '';
-    const savedToken = localStorage.getItem(tokenKey) || '';
+    // OAuth sign-in token (global, from "Sign in with GitHub") takes priority
+    // over a per-project remembered PAT.
+    const savedToken = localStorage.getItem('github.oauthToken') || localStorage.getItem(tokenKey) || '';
 
     let repoUrl, commitMessage, token;
 

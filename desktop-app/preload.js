@@ -87,6 +87,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // --- Push to GitHub (standalone subprocess) ---
   pushToGitHub: (opts) => ipcRenderer.invoke('push-to-github', opts),
+  githubDeviceStart: () => ipcRenderer.invoke('github:deviceStart'),
+  githubDeviceWait: (opts) => ipcRenderer.invoke('github:deviceWait', opts),
 
   // --- Multi-file Dependency Graph ---
   multiFileDependencyGraph: (opts) => ipcRenderer.invoke('backend:multiFileDependencyGraph', opts),

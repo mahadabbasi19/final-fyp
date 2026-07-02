@@ -25,6 +25,13 @@
     ],
     "extraResources": [
       {
+        "from": "../java_refactoring_engine/dist",
+        "to": "backend-bin",
+        "filter": [
+          "codenova-backend*"
+        ]
+      },
+      {
         "from": "../java_refactoring_engine",
         "to": "java_refactoring_engine",
         "filter": [
@@ -36,7 +43,10 @@
           ".env",
           "!__pycache__/**",
           "!*.pyc",
-          "!.env.example"
+          "!.env.example",
+          "!.venv/**",
+          "!build/**",
+          "!dist/**"
         ]
       }
     ],

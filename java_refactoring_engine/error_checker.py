@@ -310,9 +310,22 @@ class JavaSyntaxChecker:
     missing semicolons, type mismatches).
     """
 
+    # Shared across instances: a new JavaSyntaxChecker is created per request
+    # (and inside BehaviorPreservationProtocol), and per-instance mkdtemp()
+    # leaked one orphan directory per check. javac discovery is also cached —
+    # it shells out `javac -version` for up to 8 candidate paths otherwise.
+    _shared_temp_dir: Optional[str] = None
+    _cached_javac: Optional[str] = None
+    _javac_searched: bool = False
+
     def __init__(self) -> None:
-        self._temp_dir = tempfile.mkdtemp(prefix="java_checker_")
-        self._javac_path = self._find_javac()
+        if JavaSyntaxChecker._shared_temp_dir is None:
+            JavaSyntaxChecker._shared_temp_dir = tempfile.mkdtemp(prefix="java_checker_")
+        self._temp_dir = JavaSyntaxChecker._shared_temp_dir
+        if not JavaSyntaxChecker._javac_searched:
+            JavaSyntaxChecker._cached_javac = self._find_javac()
+            JavaSyntaxChecker._javac_searched = True
+        self._javac_path = JavaSyntaxChecker._cached_javac
 
     # ── JDK discovery ─────────────────────────────────────────────
 
@@ -374,7 +387,7 @@ class JavaSyntaxChecker:
                 [self._javac_path, "-Xlint:all", temp_file],
                 capture_output=True,
                 text=True,
-                timeout=3,
+                timeout=10,  # 3s timed out on larger files, producing noise warnings
             )
             errors.extend(self._parse_javac_output(result.stderr, code))
 
