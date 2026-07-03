@@ -3507,6 +3507,81 @@
   document.getElementById('btn-collab-share')?.addEventListener('click', showShareModal);
   document.getElementById('btn-collab-join')?.addEventListener('click', showJoinModal);
 
+  // ---- Activity-bar popup menus (Collab + Settings) ----
+
+  function showPopupMenu(anchorEl, items) {
+    document.getElementById('activitybar-popup')?.remove();
+    const menu = document.createElement('div');
+    menu.id = 'activitybar-popup';
+    const rect = anchorEl.getBoundingClientRect();
+    menu.style.cssText = `position:fixed;left:${rect.right + 6}px;bottom:${window.innerHeight - rect.bottom}px;z-index:10001;background:#252526;border:1px solid #454545;border-radius:5px;min-width:230px;padding:4px 0;box-shadow:0 4px 14px rgba(0,0,0,.5);font-size:13px;color:#ddd`;
+    for (const item of items) {
+      if (item === '---') {
+        const sep = document.createElement('div');
+        sep.style.cssText = 'height:1px;background:#454545;margin:4px 8px';
+        menu.appendChild(sep);
+        continue;
+      }
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:6px 14px;cursor:pointer;display:flex;align-items:center;gap:8px';
+      row.innerHTML = `<i class="codicon codicon-${item.icon}"></i><span>${escapeHtml(item.label)}</span>`;
+      row.addEventListener('mouseenter', () => row.style.background = '#094771');
+      row.addEventListener('mouseleave', () => row.style.background = '');
+      row.addEventListener('click', () => { menu.remove(); item.action(); });
+      menu.appendChild(row);
+    }
+    document.body.appendChild(menu);
+    const dismiss = (e) => {
+      if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener('mousedown', dismiss); }
+    };
+    setTimeout(() => document.addEventListener('mousedown', dismiss), 0);
+  }
+
+  document.getElementById('btn-collab-menu')?.addEventListener('click', (e) => {
+    const connected = window.collab && window.collab.isConnected();
+    showPopupMenu(e.currentTarget, [
+      { icon: 'broadcast', label: 'Share Workspace (start live session)', action: showShareModal },
+      { icon: 'link', label: 'Join Workspace (paste token)', action: showJoinModal },
+      '---',
+      { icon: 'server', label: `Collab Server: ${COLLAB_RELAY_DEFAULT}`, action: () => {
+        const url = prompt('Collaboration relay URL (ws:// or wss://):', COLLAB_RELAY_DEFAULT);
+        if (url) { localStorage.setItem('collab.relayUrl', url.trim()); showNotification('Relay URL saved. Rejoin your workspace to apply.', 'info'); }
+      }},
+      ...(connected ? [{ icon: 'debug-disconnect', label: 'Leave workspace', action: () => {
+        window.collab.disconnect();
+        showNotification('Left the collaborative workspace.', 'info');
+        renderPresenceBadge([]);
+      }}] : []),
+    ]);
+  });
+
+  document.getElementById('btn-settings')?.addEventListener('click', (e) => {
+    const ghLogin = localStorage.getItem('github.oauthLogin');
+    showPopupMenu(e.currentTarget, [
+      { icon: 'account', label: ghLogin ? `GitHub: signed in as ${ghLogin}` : 'GitHub: not signed in', action: () => {} },
+      ...(ghLogin ? [{ icon: 'sign-out', label: 'Sign out of GitHub', action: () => {
+        localStorage.removeItem('github.oauthToken');
+        localStorage.removeItem('github.oauthLogin');
+        showNotification('Signed out of GitHub.', 'info');
+      }}] : []),
+      '---',
+      { icon: 'edit', label: `Display name: ${getUsername()}`, action: () => {
+        const n = prompt('Display name (shown on collaborative cursors):', getUsername());
+        if (n && n.trim()) { localStorage.setItem('collab.username', n.trim()); showNotification('Name saved.', 'info'); }
+      }},
+      { icon: 'trash', label: 'Clear saved repo URLs & tokens', action: () => {
+        Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
+        showNotification('Cleared saved GitHub data.', 'info');
+      }},
+      '---',
+      { icon: 'refresh', label: 'Re-check backend connection', action: async () => {
+        const h = await api.backendHealth();
+        state.backendReady = h && h.status === 'healthy';
+        showNotification(state.backendReady ? 'Backend healthy.' : 'Backend unavailable: ' + (h.error || ''), state.backendReady ? 'info' : 'error');
+      }},
+    ]);
+  });
+
   // =========================================================================
   // Initialize
   // =========================================================================

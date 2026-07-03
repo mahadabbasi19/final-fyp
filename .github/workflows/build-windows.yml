@@ -1,0 +1,92 @@
+name: Build Windows Installer
+
+# Builds the complete CodeNova IDE Windows .exe on GitHub's Windows runners:
+#   1. PyInstaller compiles the Python backend into codenova-backend.exe
+#   2. electron-builder packages the IDE (NSIS installer + portable .exe)
+# Trigger: manually from the Actions tab ("Run workflow"), or push a v* tag.
+#
+# Optional repo secret OPENAI_API_KEY — if set, it is baked into the backend
+# binary so AI chat works out of the box for end users.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------- Backend: PyInstaller ----------
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Create .env for bundling
+        shell: bash
+        working-directory: java_refactoring_engine
+        run: echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" > .env
+
+      - name: Install backend deps + PyInstaller
+        working-directory: java_refactoring_engine
+        run: |
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build backend binary
+        working-directory: java_refactoring_engine
+        run: |
+          python -m PyInstaller codenova-backend.spec --noconfirm
+          dir dist
+
+      - name: Smoke-test backend binary
+        shell: bash
+        working-directory: java_refactoring_engine
+        run: |
+          CODENOVA_BACKEND_PORT=8000 ./dist/codenova-backend.exe &
+          for i in $(seq 1 30); do
+            curl -s http://127.0.0.1:8000/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8000/health
+
+      # ---------- Frontend: Electron ----------
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install app deps
+        working-directory: desktop-app
+        run: npm ci --no-audit --no-fund
+
+      - name: Build collab bundle
+        working-directory: desktop-app
+        run: npm run build:collab
+
+      - name: Build Windows installer
+        working-directory: desktop-app
+        run: npx electron-builder --win
+        env:
+          # electron-builder auto-rebuilds node-pty for Electron's ABI
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: List artifacts
+        shell: bash
+        working-directory: desktop-app
+        run: ls -lh dist/*.exe
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeNova-IDE-Windows
+          path: |
+            desktop-app/dist/*.exe
+          retention-days: 14
+
+      # On tag pushes, also attach the .exe to a GitHub Release.
+      - name: Create Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop-app/dist/*.exe
