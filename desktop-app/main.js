@@ -839,7 +839,7 @@ ipcMain.handle('github:deviceWait', async (event, { device_code, interval }) => 
 // ---------------------------------------------------------------------------
 // Push to GitHub — Standalone Python subprocess
 // ---------------------------------------------------------------------------
-ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMessage, token }) => {
+ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMessage, token, githubLogin }) => {
   return new Promise((resolve) => {
     const scriptPath = path.join(__dirname, 'backend', 'github_push.py');
 
@@ -854,6 +854,7 @@ ipcMain.handle('push-to-github', async (event, { projectPath, repoUrl, commitMes
       repo_url: repoUrl || '',
       commit_message: commitMessage || '',
       token: token || '',
+      github_login: githubLogin || '',
     });
 
     const child = spawn(pythonCmd, [scriptPath, args], {

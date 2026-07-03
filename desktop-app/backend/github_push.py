@@ -73,12 +73,21 @@ def ensure_main_branch(cwd):
     return "main"
 
 
-def ensure_identity(cwd):
+def ensure_identity(cwd, github_login=""):
     """
     A spawned subprocess on a fresh machine has no global git identity, so
     `git commit` aborts with `please tell me who you are`. Set a repo-local
-    identity (does not touch global config) only if none is configured.
+    identity (does not touch global config).
+
+    When the user is signed in with GitHub, commits are attributed to their
+    own account via GitHub's noreply address — so pushes show up on their
+    profile, exactly like committing from the github.com web editor.
     """
+    if github_login:
+        # Always prefer the signed-in identity for this repo.
+        run_git(["config", "user.name", github_login], cwd)
+        run_git(["config", "user.email", f"{github_login}@users.noreply.github.com"], cwd)
+        return
     code, out, _ = run_git(["config", "user.email"], cwd)
     if code == 0 and out.strip():
         return
@@ -162,6 +171,7 @@ def main():
     repo_url = normalize_repo_url((params.get("repo_url") or "").strip())
     commit_message = (params.get("commit_message") or "").strip() or "Update from CodeNova IDE"
     token = (params.get("token") or "").strip()
+    github_login = (params.get("github_login") or "").strip()
 
     if not project_path or not os.path.isdir(project_path):
         fail(f"Invalid project path: {project_path}")
@@ -177,8 +187,8 @@ def main():
     else:
         steps.append("Git repository already initialized")
 
-    # Ensure repo-local identity exists so commit doesn't fail on a fresh box.
-    ensure_identity(project_path)
+    # Repo-local identity: the signed-in GitHub user, or a safe fallback.
+    ensure_identity(project_path, github_login=github_login)
     # Normalize branch name to `main` (matches GitHub's default).
     branch_norm = ensure_main_branch(project_path)
     steps.append(f"Working on branch: {branch_norm or '(unborn)'}")

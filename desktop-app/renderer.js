@@ -3304,6 +3304,7 @@
         repoUrl,
         commitMessage,
         token,
+        githubLogin: localStorage.getItem('github.oauthLogin') || '',
       });
 
       progressEl.remove();
