@@ -3203,11 +3203,12 @@
         btn.disabled = true;
         statusEl.textContent = 'Contacting GitHub…';
         try {
-          const start = await api.githubDeviceStart();
+          const clientId = localStorage.getItem('github.oauthClientId') || '';
+          const start = await api.githubDeviceStart({ clientId });
           if (start.error) { statusEl.textContent = start.error; btn.disabled = false; return; }
           statusEl.innerHTML = `Enter code <b style="font-family:monospace">${escapeHtml(start.user_code)}</b> in the browser…`;
           api.openExternal(start.verification_uri);
-          const result = await api.githubDeviceWait({ device_code: start.device_code, interval: start.interval });
+          const result = await api.githubDeviceWait({ device_code: start.device_code, interval: start.interval, clientId: start._client_id });
           if (result.error) { statusEl.textContent = result.error; btn.disabled = false; return; }
           localStorage.setItem('github.oauthToken', result.token);
           if (result.login) localStorage.setItem('github.oauthLogin', result.login);
@@ -3399,37 +3400,42 @@
       <div class="github-modal">
         <div class="github-modal-header"><i class="codicon codicon-broadcast"></i> Share Workspace</div>
         <div class="github-modal-body">
-          <div style="font-size:12px;opacity:.7;margin-bottom:8px">Anyone with this token can join your live editing session. Token expires in 7 days.</div>
-          <div>
-            <label>Role granted to invitees</label>
-            <select id="collab-role" style="width:100%;padding:6px;background:#3c3c3c;color:#fff;border:1px solid #555">
-              <option value="editor" selected>Editor (read + write)</option>
-              <option value="viewer">Viewer (read only)</option>
-            </select>
+          <div style="font-size:12px;opacity:.7;margin-bottom:8px">
+            Your CodeNova becomes the session host — no server needed.
+            Send the token to teammates <b>on the same network</b> (same Wi-Fi/LAN);
+            the session ends when you close the app.
           </div>
           <div id="collab-token-result" style="display:none;margin-top:12px">
-            <label>Join token</label>
+            <label>Join token — send this to your teammate</label>
             <textarea id="collab-token-text" readonly style="width:100%;height:74px;background:#1e1e1e;color:#9cdcfe;border:1px solid #555;padding:6px;font-family:Menlo,monospace;font-size:11px"></textarea>
             <button id="collab-copy-token" style="margin-top:6px"><i class="codicon codicon-copy"></i> Copy</button>
           </div>
         </div>
         <div class="github-modal-footer">
           <button class="github-btn-cancel" id="collab-cancel">Close</button>
-          <button class="github-btn-push" id="collab-generate"><i class="codicon codicon-broadcast"></i> Generate Token</button>
+          <button class="github-btn-push" id="collab-generate"><i class="codicon codicon-broadcast"></i> Start Sharing</button>
         </div>
       </div>`;
     document.body.appendChild(overlay);
     const close = () => overlay.remove();
     overlay.querySelector('#collab-cancel').onclick = close;
     overlay.querySelector('#collab-generate').onclick = async () => {
+      const btn = overlay.querySelector('#collab-generate');
+      btn.disabled = true;
       try {
-        const role = overlay.querySelector('#collab-role').value;
-        const { token, workspaceId } = await window.collab.shareWorkspace({ role });
-        overlay.querySelector('#collab-token-text').value = token;
+        // 1. Start the in-app host (idempotent — reuses a running session).
+        const info = await api.collabHostStart();
+        if (info.error) throw new Error(info.error);
+        // 2. Connect ourselves through loopback.
+        await window.collab.joinDirect(info.localUrl, info.workspaceId, info.key);
+        // 3. Self-contained share token: encodes host address + session key.
+        const shareToken = btoa(JSON.stringify({ u: info.url, w: info.workspaceId, k: info.key }));
+        overlay.querySelector('#collab-token-text').value = shareToken;
         overlay.querySelector('#collab-token-result').style.display = 'block';
-        showNotification(`Workspace ${workspaceId.slice(0, 8)}… ready to share.`, 'info');
+        showNotification('Live session started — you are hosting.', 'info');
       } catch (e) {
         showNotification('Share failed: ' + e.message, 'error');
+        btn.disabled = false;
       }
     };
     overlay.querySelector('#collab-copy-token').onclick = () => {
@@ -3477,7 +3483,21 @@
         window.collab.onPresence(renderPresenceBadge);
         const token = overlay.querySelector('#collab-join-token').value.trim();
         if (!token) return;
-        const { workspaceId, role } = await window.collab.joinWithToken(token);
+
+        // New self-contained tokens are base64 JSON {u: hostUrl, w, k}.
+        // Fall back to legacy JWT tokens (external relay) if parsing fails.
+        let direct = null;
+        try {
+          const parsed = JSON.parse(atob(token));
+          if (parsed.u && parsed.w && parsed.k) direct = parsed;
+        } catch (_) {}
+
+        let workspaceId, role;
+        if (direct) {
+          ({ workspaceId, role } = await window.collab.joinDirect(direct.u, direct.w, direct.k));
+        } else {
+          ({ workspaceId, role } = await window.collab.joinWithToken(token));
+        }
         showNotification(`Joined workspace ${workspaceId.slice(0, 8)}… as ${role}.`, 'info');
         close();
       } catch (e) {
@@ -3548,9 +3568,10 @@
         const url = prompt('Collaboration relay URL (ws:// or wss://):', COLLAB_RELAY_DEFAULT);
         if (url) { localStorage.setItem('collab.relayUrl', url.trim()); showNotification('Relay URL saved. Rejoin your workspace to apply.', 'info'); }
       }},
-      ...(connected ? [{ icon: 'debug-disconnect', label: 'Leave workspace', action: () => {
+      ...(connected ? [{ icon: 'debug-disconnect', label: 'Leave / stop session', action: () => {
         window.collab.disconnect();
-        showNotification('Left the collaborative workspace.', 'info');
+        api.collabHostStop?.();
+        showNotification('Live session ended.', 'info');
         renderPresenceBadge([]);
       }}] : []),
     ]);
@@ -3573,6 +3594,24 @@
       { icon: 'trash', label: 'Clear saved repo URLs & tokens', action: () => {
         Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
         showNotification('Cleared saved GitHub data.', 'info');
+      }},
+      '---',
+      { icon: 'key', label: 'Set OpenAI API Key (AI chat)…', action: async () => {
+        const k = prompt('Paste your OpenAI API key (sk-…).\nStored only on this computer (~/.codenova/config.json).');
+        if (!k || !k.trim()) return;
+        try {
+          const r = await api.openaiKeySet({ openai_api_key: k.trim() });
+          showNotification(r && r.success ? 'OpenAI key saved — AI chat is ready.' : 'Failed to save key.', r && r.success ? 'info' : 'error');
+        } catch (err) {
+          showNotification('Failed to save key: ' + err.message, 'error');
+        }
+      }},
+      { icon: 'github', label: 'Set GitHub OAuth Client ID…', action: () => {
+        const id = prompt('GitHub OAuth App Client ID (enables "Sign in with GitHub").\nCreate one at github.com/settings/developers → New OAuth App → Enable Device Flow.',
+          localStorage.getItem('github.oauthClientId') || '');
+        if (id === null) return;
+        if (id.trim()) { localStorage.setItem('github.oauthClientId', id.trim()); showNotification('Client ID saved.', 'info'); }
+        else { localStorage.removeItem('github.oauthClientId'); showNotification('Client ID cleared.', 'info'); }
       }},
       '---',
       { icon: 'refresh', label: 'Re-check backend connection', action: async () => {

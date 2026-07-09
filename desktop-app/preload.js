@@ -87,8 +87,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // --- Push to GitHub (standalone subprocess) ---
   pushToGitHub: (opts) => ipcRenderer.invoke('push-to-github', opts),
-  githubDeviceStart: () => ipcRenderer.invoke('github:deviceStart'),
+  githubDeviceStart: (opts) => ipcRenderer.invoke('github:deviceStart', opts),
   githubDeviceWait: (opts) => ipcRenderer.invoke('github:deviceWait', opts),
+
+  // --- Embedded collaboration host ---
+  collabHostStart: () => ipcRenderer.invoke('collab:hostStart'),
+  collabHostStop: () => ipcRenderer.invoke('collab:hostStop'),
+  collabHostInfo: () => ipcRenderer.invoke('collab:hostInfo'),
 
   // --- Multi-file Dependency Graph ---
   multiFileDependencyGraph: (opts) => ipcRenderer.invoke('backend:multiFileDependencyGraph', opts),

@@ -91,6 +91,31 @@ async function shareWorkspace({ ttlHours = 168, role = 'editor' } = {}) {
   };
 }
 
+/**
+ * Connect to an embedded (in-app) host session.
+ * `wsBase` e.g. ws://192.168.1.5:53211 — User 1's machine on the LAN.
+ */
+async function joinDirect(wsBase, workspaceId, key) {
+  const httpBase = wsBase.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:');
+  let verified = false;
+  try {
+    const res = await fetch(httpBase + '/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace_id: workspaceId, key }),
+    });
+    verified = res.ok && (await res.json()).valid;
+  } catch (e) {
+    throw new Error(
+      'Cannot reach the host. Make sure the person sharing still has CodeNova open ' +
+      'and you are on the same network. (' + e.message + ')');
+  }
+  if (!verified) throw new Error('Invalid or expired share token.');
+  state.relayUrl = wsBase;
+  await _connectWorkspace(key, workspaceId, 'editor');
+  return { workspaceId, role: 'editor' };
+}
+
 async function joinWithToken(token) {
   const verify = await fetch(relayHttp('/verify'), {
     method: 'POST',
@@ -250,7 +275,7 @@ function disconnect() {
 }
 
 window.collab = {
-  init, shareWorkspace, joinWithToken,
+  init, shareWorkspace, joinWithToken, joinDirect,
   bindEditor, listFiles, updateFileEntry, deleteFileEntry,
   onPresence, onFileTreeChange,
   isConnected, disconnect,

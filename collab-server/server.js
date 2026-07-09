@@ -129,11 +129,23 @@ async function getDoc(docName) {
   // Load persisted state.
   const persisted = await persistence.getYDoc(docName);
   Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(persisted));
-  // Flush updates to LevelDB on every change.
-  ydoc.on('update', (update) => {
+  // Flush updates to LevelDB AND broadcast to all peers except the origin.
+  // (Without the broadcast, edits reached the server doc but other clients
+  // never received them — the earlier test passed only because same-process
+  // providers short-circuit through a BroadcastChannel.)
+  ydoc.on('update', (update, origin) => {
     persistence.storeUpdate(docName, update).catch((err) =>
       console.error('[persist] storeUpdate failed', docName, err.message),
     );
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MSG_SYNC);
+    syncProtocol.writeUpdate(enc, update);
+    const payload = encoding.toUint8Array(enc);
+    for (const conn of (docs.get(docName)?.conns.keys() || [])) {
+      if (conn !== origin && conn.readyState === conn.OPEN) {
+        try { conn.send(payload); } catch (_) {}
+      }
+    }
   });
 
   const awareness = new awarenessProtocol.Awareness(ydoc);
@@ -210,18 +222,11 @@ async function onConnection(conn, docName, payload) {
         case MSG_SYNC: {
           if (conn._role === 'viewer') break; // read-only
           encoding.writeVarUint(encoder, MSG_SYNC);
+          // Applies updates (origin = conn → ydoc.on('update') broadcast
+          // skips the sender) and writes sync replies for the sender only.
           syncProtocol.readSyncMessage(decoder, encoder, entry.ydoc, conn);
-          // Broadcast resulting update to other peers.
           if (encoding.length(encoder) > 1) {
-            const payload = encoding.toUint8Array(encoder);
-            // First, reply to the sender so it acks step 2.
             send(conn, encoder);
-            // Then broadcast the new state to siblings.
-            for (const other of entry.conns.keys()) {
-              if (other !== conn && other.readyState === other.OPEN) {
-                try { other.send(payload); } catch (_) {}
-              }
-            }
           }
           break;
         }

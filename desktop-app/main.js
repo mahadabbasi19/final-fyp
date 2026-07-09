@@ -780,6 +780,23 @@ ipcMain.handle('backend:gitStashList', async (event, { repo_path }) => {
 });
 
 // ---------------------------------------------------------------------------
+// Embedded Collaboration Host — the app itself hosts the live session
+// ---------------------------------------------------------------------------
+const collabHost = require('./collab-host');
+
+ipcMain.handle('collab:hostStart', async () => {
+  try {
+    return await collabHost.startHost();
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+ipcMain.handle('collab:hostStop', () => collabHost.stopHost());
+ipcMain.handle('collab:hostInfo', () => collabHost.hostInfo());
+
+app.on('before-quit', () => { try { collabHost.stopHost(); } catch (_) {} });
+
+// ---------------------------------------------------------------------------
 // GitHub OAuth Device Flow — "Sign in with GitHub" (like VS Code)
 // ---------------------------------------------------------------------------
 // Requires a (free) GitHub OAuth App with Device Flow enabled:
@@ -788,22 +805,25 @@ ipcMain.handle('backend:gitStashList', async (event, { repo_path }) => {
 // The client ID is public by design (no secret is used in device flow).
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || 'REPLACE_WITH_OAUTH_APP_CLIENT_ID';
 
-ipcMain.handle('github:deviceStart', async () => {
-  if (GITHUB_CLIENT_ID.startsWith('REPLACE_')) {
-    return { error: 'GitHub OAuth App not configured. Set GITHUB_CLIENT_ID in main.js (see comment above it).' };
+ipcMain.handle('github:deviceStart', async (event, opts) => {
+  // Runtime override (set from the app's Settings menu) beats the constant,
+  // so a shipped build can be activated without rebuilding.
+  const clientId = (opts && opts.clientId) || GITHUB_CLIENT_ID;
+  if (!clientId || clientId.startsWith('REPLACE_')) {
+    return { error: 'GitHub OAuth not configured. Settings (gear icon) → "Set GitHub OAuth Client ID", or ask the app publisher to bake one in.' };
   }
   const res = await fetch('https://github.com/login/device/code', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({ client_id: GITHUB_CLIENT_ID, scope: 'repo' }),
+    body: JSON.stringify({ client_id: clientId, scope: 'repo' }),
   });
   if (!res.ok) return { error: `GitHub returned ${res.status}` };
   const data = await res.json();
-  // { device_code, user_code, verification_uri, expires_in, interval }
+  data._client_id = clientId;
   return data;
 });
 
-ipcMain.handle('github:deviceWait', async (event, { device_code, interval }) => {
+ipcMain.handle('github:deviceWait', async (event, { device_code, interval, clientId }) => {
   const pollMs = Math.max(5, interval || 5) * 1000;
   const deadline = Date.now() + 10 * 60 * 1000; // give the user 10 minutes
   while (Date.now() < deadline) {
@@ -812,7 +832,7 @@ ipcMain.handle('github:deviceWait', async (event, { device_code, interval }) => 
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
+        client_id: clientId || GITHUB_CLIENT_ID,
         device_code,
         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
       }),

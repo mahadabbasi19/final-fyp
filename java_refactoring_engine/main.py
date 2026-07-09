@@ -1000,14 +1000,20 @@ _load_dotenv()
 
 
 def _resolve_openai_key(request_key: Optional[str] = None) -> str:
-    """Return the first key found in priority order. Empty string if none."""
+    """Return the first key found, in priority order:
+      1. per-request key
+      2. ~/.codenova/config.json  (set from the app's Settings menu)
+      3. environment / bundled .env
+    User config outranks the bundled .env deliberately: a key baked into a
+    shipped binary may be stale or revoked, and the user must be able to fix
+    that from inside the app without rebuilding the installer.
+    """
     if request_key and request_key.strip():
         return request_key.strip()
-    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if env_key:
-        return env_key
     cfg_key = (_read_user_config().get("openai_api_key") or "").strip()
-    return cfg_key
+    if cfg_key:
+        return cfg_key
+    return os.environ.get("OPENAI_API_KEY", "").strip()
 
 
 def _get_openai_client(request_key: Optional[str] = None):
@@ -1042,8 +1048,8 @@ async def openai_key_status():
     return {
         "configured": bool(key),
         "source": (
-            "env" if os.environ.get("OPENAI_API_KEY", "").strip()
-            else "user_config" if (_read_user_config().get("openai_api_key") or "").strip()
+            "user_config" if (_read_user_config().get("openai_api_key") or "").strip()
+            else "env" if os.environ.get("OPENAI_API_KEY", "").strip()
             else "none"
         ),
     }
