@@ -37,3 +37,6 @@ dist/
 # PyInstaller
 java_refactoring_engine/build/
 java_refactoring_engine/.venv/
+
+# Collab relay runtime data
+collab-server/y-leveldb/

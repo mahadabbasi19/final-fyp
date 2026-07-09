@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//opt/homebrew/bin/**)",
+      "Read(//Users/mahadahmedabbasi/.nvm/versions/**)",
+      "Read(//Users/mahadahmedabbasi/.volta/**)",
+      "Bash(java -version)"
+    ]
+  }
+}
