@@ -1,0 +1,20 @@
+# Render.com blueprint — deploys the collaboration relay in ~3 clicks:
+#   1. Push this repo to GitHub (done).
+#   2. render.com → New → Blueprint → pick this repo → Apply.
+#   3. Copy the service URL (e.g. https://codenova-relay.onrender.com) and
+#      set it in the IDE: 📡 menu → "Collab Server" → wss://codenova-relay.onrender.com
+# JWT_SECRET is generated automatically; PORT is injected by Render.
+
+services:
+  - type: web
+    name: codenova-relay
+    runtime: node
+    rootDir: collab-server
+    plan: free
+    buildCommand: npm ci --omit=dev
+    startCommand: node server.js
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: PERSIST_DIR
+        value: /tmp/y-leveldb

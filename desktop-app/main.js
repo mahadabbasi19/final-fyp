@@ -308,6 +308,23 @@ function createWindow() {
 function buildAppMenu() {
   const isMac = process.platform === 'darwin';
   const template = [
+    // macOS requires the first menu to be the application menu — it owns
+    // Cmd+Q (Quit), Cmd+H (Hide), About, etc. Without it none of those
+    // system shortcuts work.
+    ...(isMac ? [{
+      label: 'CodeNova IDE',
+      submenu: [
+        { role: 'about' },
+        { type: 'separator' },
+        { role: 'services' },
+        { type: 'separator' },
+        { role: 'hide' },
+        { role: 'hideOthers' },
+        { role: 'unhide' },
+        { type: 'separator' },
+        { role: 'quit' }
+      ]
+    }] : []),
     {
       label: 'File',
       submenu: [
@@ -370,6 +387,8 @@ function buildAppMenu() {
         { label: 'New Terminal', accelerator: 'CmdOrCtrl+Shift+`', click: () => mainWindow?.webContents.send('menu:newTerminal') }
       ]
     },
+    // Window menu: Cmd+M minimize, Cmd+W close, zoom, etc.
+    ...(isMac ? [{ role: 'windowMenu' }] : []),
     {
       label: 'Help',
       submenu: [

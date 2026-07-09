@@ -3400,10 +3400,14 @@
       <div class="github-modal">
         <div class="github-modal-header"><i class="codicon codicon-broadcast"></i> Share Workspace</div>
         <div class="github-modal-body">
-          <div style="font-size:12px;opacity:.7;margin-bottom:8px">
-            Your CodeNova becomes the session host — no server needed.
-            Send the token to teammates <b>on the same network</b> (same Wi-Fi/LAN);
-            the session ends when you close the app.
+          <label>How should teammates connect?</label>
+          <select id="collab-mode" style="width:100%;padding:6px;background:#3c3c3c;color:#fff;border:1px solid #555;margin-bottom:8px">
+            <option value="lan" selected>Same network (instant — your app hosts, no server)</option>
+            <option value="relay">Worldwide (via relay server — works from anywhere)</option>
+          </select>
+          <div id="collab-mode-hint" style="font-size:12px;opacity:.7;margin-bottom:8px">
+            Your CodeNova becomes the session host. Works for teammates on the
+            same Wi-Fi/LAN; the session ends when you close the app.
           </div>
           <div id="collab-token-result" style="display:none;margin-top:12px">
             <label>Join token — send this to your teammate</label>
@@ -3419,20 +3423,42 @@
     document.body.appendChild(overlay);
     const close = () => overlay.remove();
     overlay.querySelector('#collab-cancel').onclick = close;
+
+    const modeSel = overlay.querySelector('#collab-mode');
+    const hintEl = overlay.querySelector('#collab-mode-hint');
+    modeSel.onchange = () => {
+      hintEl.innerHTML = modeSel.value === 'lan'
+        ? 'Your CodeNova becomes the session host. Works for teammates on the same Wi-Fi/LAN; the session ends when you close the app.'
+        : `Uses the relay server (<b>${escapeHtml(localStorage.getItem('collab.relayUrl') || COLLAB_RELAY_DEFAULT)}</b>). Teammates can join from anywhere in the world. Configure the relay URL from the 📡 menu.`;
+    };
+
     overlay.querySelector('#collab-generate').onclick = async () => {
       const btn = overlay.querySelector('#collab-generate');
       btn.disabled = true;
       try {
-        // 1. Start the in-app host (idempotent — reuses a running session).
-        const info = await api.collabHostStart();
-        if (info.error) throw new Error(info.error);
-        // 2. Connect ourselves through loopback.
-        await window.collab.joinDirect(info.localUrl, info.workspaceId, info.key);
-        // 3. Self-contained share token: encodes host address + session key.
-        const shareToken = btoa(JSON.stringify({ u: info.url, w: info.workspaceId, k: info.key }));
+        let shareToken;
+        if (modeSel.value === 'lan') {
+          // In-app host (idempotent — reuses a running session).
+          const info = await api.collabHostStart();
+          if (info.error) throw new Error(info.error);
+          await window.collab.joinDirect(info.localUrl, info.workspaceId, info.key);
+          shareToken = btoa(JSON.stringify({ u: info.url, w: info.workspaceId, k: info.key }));
+          showNotification('Live session started — you are hosting.', 'info');
+        } else {
+          // Worldwide: JWT session on the configured relay server.
+          try {
+            const { token, workspaceId } = await window.collab.shareWorkspace({ role: 'editor' });
+            shareToken = token;
+            showNotification(`Worldwide session ${workspaceId.slice(0, 8)}… started.`, 'info');
+          } catch (relayErr) {
+            throw new Error(
+              'Relay server unreachable at ' +
+              (localStorage.getItem('collab.relayUrl') || COLLAB_RELAY_DEFAULT) +
+              '. Deploy collab-server (see repo README) and set its URL via the 📡 menu → "Collab Server". (' + relayErr.message + ')');
+          }
+        }
         overlay.querySelector('#collab-token-text').value = shareToken;
         overlay.querySelector('#collab-token-result').style.display = 'block';
-        showNotification('Live session started — you are hosting.', 'info');
       } catch (e) {
         showNotification('Share failed: ' + e.message, 'error');
         btn.disabled = false;
