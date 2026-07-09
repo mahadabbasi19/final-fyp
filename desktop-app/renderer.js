@@ -3151,12 +3151,12 @@
             </div>
             <div>
               <label>GitHub Account</label>
-              <div id="github-signin-row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+              <div id="github-signin-row" style="display:none;gap:8px;align-items:center;margin-bottom:6px">
                 <button id="github-signin-btn" style="display:flex;align-items:center;gap:6px"><i class="codicon codicon-github"></i> Sign in with GitHub</button>
                 <span id="github-signin-status" style="font-size:12px;opacity:.8"></span>
               </div>
-              <label style="font-size:11px;opacity:.7">…or paste a Personal Access Token manually</label>
-              <input type="password" id="github-token" placeholder="ghp_… — create at github.com/settings/tokens" spellcheck="false" autocomplete="off" />
+              <label style="font-size:11px;opacity:.7">Personal Access Token — create one at github.com/settings/tokens (scope: repo)</label>
+              <input type="password" id="github-token" placeholder="ghp_…" spellcheck="false" autocomplete="off" />
             </div>
             <div>
               <label>Commit Message</label>
@@ -3184,6 +3184,11 @@
       const pushBtn = overlay.querySelector('#github-push-btn');
       const cancelBtn = overlay.querySelector('#github-cancel-btn');
 
+      // OAuth sign-in row is shown only when a Client ID has been configured
+      // (Settings → Set GitHub OAuth Client ID). Default UX is PAT-only.
+      if (localStorage.getItem('github.oauthClientId')) {
+        overlay.querySelector('#github-signin-row').style.display = 'flex';
+      }
       // Pre-fill token: prefer a GitHub sign-in token, else a remembered PAT.
       const oauthToken = localStorage.getItem('github.oauthToken') || '';
       const oauthLogin = localStorage.getItem('github.oauthLogin') || '';
