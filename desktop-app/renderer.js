@@ -3349,7 +3349,9 @@
   // Real-time Collaboration
   // =========================================================================
 
-  const COLLAB_RELAY_DEFAULT = localStorage.getItem('collab.relayUrl') || 'ws://127.0.0.1:1234';
+  // Production relay (deployed on Render) — every installed copy uses this
+  // by default; users can override from the 📡 menu if they self-host.
+  const COLLAB_RELAY_DEFAULT = localStorage.getItem('collab.relayUrl') || 'wss://codenova-relay.onrender.com';
 
   function getUsername() {
     let n = localStorage.getItem('collab.username');
