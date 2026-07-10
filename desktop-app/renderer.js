@@ -3634,58 +3634,35 @@
   });
 
   document.getElementById('btn-settings')?.addEventListener('click', (e) => {
-    // End-user settings only. Publisher/advanced actions (custom OpenAI key,
-    // OAuth Client ID) live behind the "Advanced" toggle — chat and collab
-    // work out of the box with the bundled configuration, so normal users
-    // never need them.
-    const advanced = localStorage.getItem('settings.advanced') === '1';
-    const items = [
-      { icon: 'edit', label: `Display name: ${getUsername()}`, action: () => {
-        const n = prompt('Display name (shown on collaborative cursors):', getUsername());
+    // VS Code-style Manage menu. No API keys, no publisher knobs — those are
+    // baked into the build. (Backend /config endpoints still exist for
+    // power users via curl, but nothing in the UI surfaces them.)
+    showPopupMenu(e.currentTarget, [
+      { icon: 'account', label: `Accounts: ${localStorage.getItem('github.oauthLogin') || getUsername()}`, action: () => {
+        const n = prompt('Display name (shown to teammates in live sessions):', getUsername());
         if (n && n.trim()) { localStorage.setItem('collab.username', n.trim()); showNotification('Name saved.', 'info'); }
       }},
-      { icon: 'trash', label: 'Clear saved GitHub tokens & repo URLs', action: () => {
-        Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
-        showNotification('Cleared saved GitHub data.', 'info');
+      '---',
+      { icon: 'settings-gear', label: 'Settings', action: () => {
+        showNotification('Editor settings: use the View / Terminal menus. More options coming.', 'info');
       }},
-      { icon: 'refresh', label: 'Re-check backend connection', action: async () => {
-        const h = await api.backendHealth();
-        state.backendReady = h && h.status === 'healthy';
-        showNotification(state.backendReady ? 'Backend healthy.' : 'Backend unavailable: ' + (h.error || ''), state.backendReady ? 'info' : 'error');
+      { icon: 'keyboard', label: 'Keyboard Shortcuts', action: () => {
+        showNotification('Ctrl+N New · Ctrl+O Open · Ctrl+S Save · Ctrl+` Terminal · F5 Run · Ctrl+Shift+I AI Chat', 'info');
+      }},
+      { icon: 'trash', label: 'Clear Saved Data (tokens, repo URLs)', action: () => {
+        Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
+        showNotification('Saved GitHub data cleared.', 'info');
       }},
       '---',
-      { icon: 'settings', label: advanced ? 'Hide advanced settings' : 'Advanced settings…', action: () => {
-        localStorage.setItem('settings.advanced', advanced ? '0' : '1');
-        showNotification(advanced ? 'Advanced settings hidden.' : 'Advanced settings enabled — reopen the menu.', 'info');
+      { icon: 'pulse', label: 'Backend Status', action: async () => {
+        const h = await api.backendHealth();
+        state.backendReady = h && h.status === 'healthy';
+        showNotification(state.backendReady ? 'All systems running.' : 'Backend unavailable: ' + (h.error || ''), state.backendReady ? 'info' : 'error');
       }},
-    ];
-    if (advanced) {
-      items.push(
-        { icon: 'key', label: 'Use custom OpenAI key (optional)…', action: async () => {
-          const k = prompt('AI chat already works with the built-in key.\nPaste your own OpenAI key only if you want requests billed to your account.\nStored on this computer only (~/.codenova/config.json). Leave empty to clear.');
-          if (k === null) return;
-          try {
-            if (k.trim()) {
-              const r = await api.openaiKeySet({ openai_api_key: k.trim() });
-              showNotification(r && r.success ? 'Custom key saved.' : 'Failed to save key.', r && r.success ? 'info' : 'error');
-            } else {
-              await api.openaiKeyClear();
-              showNotification('Custom key cleared — using the built-in key.', 'info');
-            }
-          } catch (err) {
-            showNotification('Failed: ' + err.message, 'error');
-          }
-        }},
-        { icon: 'github', label: 'Set GitHub OAuth Client ID…', action: () => {
-          const id = prompt('Enables "Sign in with GitHub" (instead of PAT).\nPublisher setting — create an OAuth App with Device Flow at github.com/settings/developers.',
-            localStorage.getItem('github.oauthClientId') || '');
-          if (id === null) return;
-          if (id.trim()) { localStorage.setItem('github.oauthClientId', id.trim()); showNotification('Client ID saved.', 'info'); }
-          else { localStorage.removeItem('github.oauthClientId'); showNotification('Client ID cleared.', 'info'); }
-        }},
-      );
-    }
-    showPopupMenu(e.currentTarget, items);
+      { icon: 'info', label: 'About CodeNova IDE', action: () => {
+        showNotification('CodeNova IDE v2.0.0 — AI-driven Java refactoring IDE. Built with Electron + Monaco.', 'info');
+      }},
+    ]);
   });
 
   // =========================================================================
