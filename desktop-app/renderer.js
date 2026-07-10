@@ -2705,28 +2705,51 @@
     });
 
     const maxLayer = Math.max(...Object.keys(layers).map(Number));
-    const layerCount = maxLayer + 1;
 
-    // Position nodes: top layers = most dependencies, bottom = leaf models
-    const padX = 80;
-    const padY = 60;
+    // Position nodes with row WRAPPING: a layer with more files than fit
+    // across the panel is split into multiple visual rows. Previously all
+    // unconnected files shared layer 0 and were squeezed into one row,
+    // overlapping into an unreadable stack.
+    const padX = 40;
+    const padY = 50;
+    const NODE_W = 130;
+    const H_GAP = 24;
+    const V_GAP = 84;
     const usableW = w - padX * 2;
-    const rowH = Math.min(90, (h - padY * 2) / Math.max(layerCount, 1));
-    const nodePositions = {};
+    const perRow = Math.max(1, Math.floor((usableW + H_GAP) / (NODE_W + H_GAP)));
 
-    // Reverse so layer 0 (leaves) is at bottom, highest at top
-    for (let l = 0; l <= maxLayer; l++) {
+    // Visual rows, top (most-dependent layer) → bottom (leaves).
+    const visualRows = [];
+    for (let l = maxLayer; l >= 0; l--) {
       const row = layers[l] || [];
-      const y = padY + (maxLayer - l) * rowH + rowH / 2;
-      const gap = usableW / (row.length + 1);
+      for (let i = 0; i < row.length; i += perRow) {
+        visualRows.push(row.slice(i, i + perRow));
+      }
+    }
+
+    // Resize canvas height to fit all rows (must happen before drawing).
+    const neededH = padY * 2 + visualRows.length * V_GAP;
+    if (neededH > h) {
+      canvas.height = neededH * dpr;
+      canvas.style.height = neededH + 'px';
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, w, neededH);
+    }
+
+    const nodePositions = {};
+    visualRows.forEach((row, r) => {
+      const y = padY + r * V_GAP + V_GAP / 2;
+      const rowWidth = row.length * NODE_W + (row.length - 1) * H_GAP;
+      const startX = padX + Math.max(0, (usableW - rowWidth) / 2) + NODE_W / 2;
       row.forEach((n, i) => {
         nodePositions[nodeKey(n)] = {
-          x: padX + gap * (i + 1),
+          x: startX + i * (NODE_W + H_GAP),
           y: y,
           node: n
         };
       });
-    }
+    });
 
     // ── Edge colors & styles ──
     const edgeColors = { extends: '#e53935', implements: '#43a047', uses: '#546e7a' };
@@ -3611,48 +3634,58 @@
   });
 
   document.getElementById('btn-settings')?.addEventListener('click', (e) => {
-    const ghLogin = localStorage.getItem('github.oauthLogin');
-    showPopupMenu(e.currentTarget, [
-      { icon: 'account', label: ghLogin ? `GitHub: signed in as ${ghLogin}` : 'GitHub: not signed in', action: () => {} },
-      ...(ghLogin ? [{ icon: 'sign-out', label: 'Sign out of GitHub', action: () => {
-        localStorage.removeItem('github.oauthToken');
-        localStorage.removeItem('github.oauthLogin');
-        showNotification('Signed out of GitHub.', 'info');
-      }}] : []),
-      '---',
+    // End-user settings only. Publisher/advanced actions (custom OpenAI key,
+    // OAuth Client ID) live behind the "Advanced" toggle — chat and collab
+    // work out of the box with the bundled configuration, so normal users
+    // never need them.
+    const advanced = localStorage.getItem('settings.advanced') === '1';
+    const items = [
       { icon: 'edit', label: `Display name: ${getUsername()}`, action: () => {
         const n = prompt('Display name (shown on collaborative cursors):', getUsername());
         if (n && n.trim()) { localStorage.setItem('collab.username', n.trim()); showNotification('Name saved.', 'info'); }
       }},
-      { icon: 'trash', label: 'Clear saved repo URLs & tokens', action: () => {
+      { icon: 'trash', label: 'Clear saved GitHub tokens & repo URLs', action: () => {
         Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
         showNotification('Cleared saved GitHub data.', 'info');
       }},
-      '---',
-      { icon: 'key', label: 'Set OpenAI API Key (AI chat)…', action: async () => {
-        const k = prompt('Paste your OpenAI API key (sk-…).\nStored only on this computer (~/.codenova/config.json).');
-        if (!k || !k.trim()) return;
-        try {
-          const r = await api.openaiKeySet({ openai_api_key: k.trim() });
-          showNotification(r && r.success ? 'OpenAI key saved — AI chat is ready.' : 'Failed to save key.', r && r.success ? 'info' : 'error');
-        } catch (err) {
-          showNotification('Failed to save key: ' + err.message, 'error');
-        }
-      }},
-      { icon: 'github', label: 'Set GitHub OAuth Client ID…', action: () => {
-        const id = prompt('GitHub OAuth App Client ID (enables "Sign in with GitHub").\nCreate one at github.com/settings/developers → New OAuth App → Enable Device Flow.',
-          localStorage.getItem('github.oauthClientId') || '');
-        if (id === null) return;
-        if (id.trim()) { localStorage.setItem('github.oauthClientId', id.trim()); showNotification('Client ID saved.', 'info'); }
-        else { localStorage.removeItem('github.oauthClientId'); showNotification('Client ID cleared.', 'info'); }
-      }},
-      '---',
       { icon: 'refresh', label: 'Re-check backend connection', action: async () => {
         const h = await api.backendHealth();
         state.backendReady = h && h.status === 'healthy';
         showNotification(state.backendReady ? 'Backend healthy.' : 'Backend unavailable: ' + (h.error || ''), state.backendReady ? 'info' : 'error');
       }},
-    ]);
+      '---',
+      { icon: 'settings', label: advanced ? 'Hide advanced settings' : 'Advanced settings…', action: () => {
+        localStorage.setItem('settings.advanced', advanced ? '0' : '1');
+        showNotification(advanced ? 'Advanced settings hidden.' : 'Advanced settings enabled — reopen the menu.', 'info');
+      }},
+    ];
+    if (advanced) {
+      items.push(
+        { icon: 'key', label: 'Use custom OpenAI key (optional)…', action: async () => {
+          const k = prompt('AI chat already works with the built-in key.\nPaste your own OpenAI key only if you want requests billed to your account.\nStored on this computer only (~/.codenova/config.json). Leave empty to clear.');
+          if (k === null) return;
+          try {
+            if (k.trim()) {
+              const r = await api.openaiKeySet({ openai_api_key: k.trim() });
+              showNotification(r && r.success ? 'Custom key saved.' : 'Failed to save key.', r && r.success ? 'info' : 'error');
+            } else {
+              await api.openaiKeyClear();
+              showNotification('Custom key cleared — using the built-in key.', 'info');
+            }
+          } catch (err) {
+            showNotification('Failed: ' + err.message, 'error');
+          }
+        }},
+        { icon: 'github', label: 'Set GitHub OAuth Client ID…', action: () => {
+          const id = prompt('Enables "Sign in with GitHub" (instead of PAT).\nPublisher setting — create an OAuth App with Device Flow at github.com/settings/developers.',
+            localStorage.getItem('github.oauthClientId') || '');
+          if (id === null) return;
+          if (id.trim()) { localStorage.setItem('github.oauthClientId', id.trim()); showNotification('Client ID saved.', 'info'); }
+          else { localStorage.removeItem('github.oauthClientId'); showNotification('Client ID cleared.', 'info'); }
+        }},
+      );
+    }
+    showPopupMenu(e.currentTarget, items);
   });
 
   // =========================================================================

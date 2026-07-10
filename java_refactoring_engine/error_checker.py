@@ -1071,8 +1071,11 @@ class StaticAnalyzer:
 
     # ── magic numbers ─────────────────────────────────────────────
 
-    _MAGIC_RE = re.compile(r"(?<![=\d\w])\b(\d{2,})\b(?![Ll])")
-    _SAFE_NUMBERS: Set[str] = {"10", "16", "32", "64", "100", "1000", "255"}
+    # Only 3+ digit literals are flagged. The old 2-digit threshold combined
+    # with a safelist containing 10 but not 20 produced inconsistent results
+    # (`int a = 10;` clean, `int b = 20;` warned) that looked like a bug.
+    _MAGIC_RE = re.compile(r"(?<![=\d\w])\b(\d{3,})\b(?![Ll])")
+    _SAFE_NUMBERS: Set[str] = {"100", "1000", "1024", "255", "360", "365"}
 
     def _check_magic_numbers(
         self, code: str, lines: List[str], cmap: Dict[int, bool],
