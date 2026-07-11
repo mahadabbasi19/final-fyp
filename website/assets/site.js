@@ -70,6 +70,26 @@
       });
     });
 
+    // ----- First-run notes (unsigned builds) -----
+    // Every primary download button gets an OS-appropriate note so users
+    // aren't surprised by SmartScreen / Gatekeeper.
+    var NOTES = {
+      windows: 'After downloading, run the installer. If Windows shows “Windows protected your PC”, click More info → Run anyway. This appears because the app is not code-signed, not because anything is wrong.',
+      mac: 'After downloading, drag CodeNova to Applications, then right-click → Open → Open on first launch (required once for apps outside the App Store).'
+    };
+    Array.prototype.forEach.call(document.querySelectorAll('.btn[data-download]'), function (btn) {
+      var os = btn.getAttribute('data-download');
+      if (os === 'auto') os = detectOS();
+      var note = document.createElement('p');
+      note.className = 'dl-note';
+      note.textContent = NOTES[os] || NOTES.windows;
+      // Header buttons are too cramped for a note — only annotate buttons
+      // that sit inside page content.
+      if (!btn.closest('.site-header')) {
+        btn.insertAdjacentElement('afterend', note);
+      }
+    });
+
     // Mobile nav toggle
     var toggle = document.querySelector('.nav-toggle');
     var nav = document.querySelector('.nav');

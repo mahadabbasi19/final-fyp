@@ -294,3 +294,12 @@ pre, table { max-width: 100%; }
   .req-table th, .req-table td { padding: 9px 8px; white-space: normal; word-break: break-word; }
   .req-table td:first-child { width: 62px; }
 }
+
+/* First-run note under download buttons (unsigned-build guidance) */
+.dl-note {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+  max-width: 440px;
+}
