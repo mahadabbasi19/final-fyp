@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CodeNova AI — The AI-Native Desktop Code Editor</title>
+  <meta name="description"
+    content="CodeNova AI is a fast, AI-native desktop code editor with real-time team collaboration, intelligent refactoring, and a live dependency graph. Download free for Windows and macOS." />
+  <link rel="icon" href="images/logo_codenova.png" />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+
+  <!-- Icons + GSAP (for the target cursor) -->
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+  <link rel="stylesheet" href="assets/site.css" />
+  <link rel="stylesheet" href="assets/target-cursor.css" />
+</head>
+
+<body>
+  <!-- ===================== HEADER ===================== -->
+  <header class="site-header">
+    <div class="container">
+      <nav class="nav">
+        <a href="index.html" class="nav-logo">
+          <img src="images/logo_codenova.png" alt="CodeNova AI logo" />
+          <span>CodeNova&nbsp;AI</span>
+        </a>
+
+        <div class="nav-menu">
+          <a href="requirements.html" class="nav-link">Requirements</a>
+          <a href="products.html" class="nav-link">Products</a>
+        </div>
+
+        <div class="nav-actions">
+          <a href="#" class="btn btn-primary" data-download="auto">
+            <i data-lucide="download" style="width:18px;height:18px"></i>
+            <span data-download-label>Download</span>
+          </a>
+          <button class="nav-toggle" aria-label="Toggle menu">
+            <i data-lucide="menu"></i>
+          </button>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===================== HERO ===================== -->
+    <section style="padding: 92px 0 72px; overflow: hidden;">
+      <div class="glow brand-gradient" style="width:640px;height:640px;top:-260px;left:-160px;"></div>
+      <div class="glow" style="width:420px;height:420px;top:40px;right:-120px;background:var(--violet-bright);opacity:.28;"></div>
+
+      <div class="container" style="position:relative;z-index:1;">
+        <!-- Centered headline -->
+        <div style="text-align:center;">
+          <span class="eyebrow reveal">
+            <i data-lucide="sparkles" style="width:15px;height:15px"></i>
+            AI-native code editor · v2.0
+          </span>
+          <h1 class="reveal" style="font-size:clamp(38px,6vw,72px);font-weight:800;margin:26px auto 0;max-width:16ch;">
+            Code at the speed of thought.
+          </h1>
+        </div>
+
+        <!-- Split: copy left · application snippet right -->
+        <div class="hero-split">
+          <div class="hero-copy reveal">
+            <p class="lead">
+              CodeNova AI unites an intelligent editor, real-time team collaboration, and
+              automated refactoring in one blazing-fast desktop app — built to help you ship faster.
+            </p>
+            <p style="color:var(--muted);font-size:14px;margin-top:22px;display:flex;align-items:center;gap:8px;">
+              <i data-lucide="check-circle-2" style="width:16px;height:16px;color:var(--violet-light)"></i>
+              Free for individuals · No account required · Windows &amp; macOS · 64-bit
+            </p>
+          </div>
+
+          <!-- Application snippet — target cursor lives ONLY on the bars -->
+          <div id="hero-app" class="reveal">
+            <div class="window">
+              <div class="window-bar">
+                <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+                <span class="window-title mono">CodeNova AI — server.ts</span>
+                <span style="margin-left:auto;display:flex;gap:8px;align-items:center;color:var(--muted);font-size:12px;">
+                  <i data-lucide="git-branch" style="width:14px;height:14px"></i> main
+                </span>
+              </div>
+              <div class="code">
+                <div class="lines">1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9</div>
+                <pre><code><span class="tok-key">import</span> { <span class="tok-fn">createServer</span> } <span class="tok-key">from</span> <span class="tok-str">'codenova/http'</span>;
+
+<span class="tok-key">export async function</span> <span class="tok-fn">bootstrap</span>() {
+  <span class="tok-key">const</span> app = <span class="tok-fn">createServer</span>();
+  app.<span class="tok-fn">use</span>(<span class="tok-fn">logger</span>(), <span class="tok-fn">auth</span>());
+  <span class="tok-com">// ⌘K → "add rate limiting"</span>
+  app.<span class="tok-fn">use</span>(<span class="tok-fn">rateLimit</span>({ max: <span class="tok-num">100</span> }));
+  <span class="tok-key">return</span> app.<span class="tok-fn">listen</span>(<span class="tok-num">3000</span>);
+}</code></pre>
+              </div>
+            </div>
+
+            <!-- Floating feature bars — spinning target cursor snaps to these -->
+            <div class="float-bar cursor-target" style="top:30px;left:-38px;">
+              <i data-lucide="users" style="width:16px;height:16px;color:var(--violet-light)"></i> Team Collaboration
+            </div>
+            <div class="float-bar cursor-target" style="top:108px;right:-40px;">
+              <i data-lucide="wand-2" style="width:16px;height:16px;color:var(--violet-light)"></i> Refactoring
+            </div>
+            <div class="float-bar cursor-target" style="bottom:64px;left:-46px;">
+              <i data-lucide="git-merge" style="width:16px;height:16px;color:var(--violet-light)"></i> Git Built-in
+            </div>
+            <div class="float-bar cursor-target" style="bottom:18px;right:-32px;">
+              <i data-lucide="brain-circuit" style="width:16px;height:16px;color:var(--violet-light)"></i> Code Intelligence
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== WORKING CHAT SCREENSHOT ===================== -->
+    <section style="padding:32px 0 72px;">
+      <div class="container">
+        <div class="reveal window chat-window">
+          <div class="window-bar">
+            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <span class="window-title mono">CodeNova AI — Assistant</span>
+          </div>
+          <div class="chat-body" id="chatBody">
+            <div class="chat-msg ai">Hi! Ask me anything about your code — or just say hello.</div>
+          </div>
+          <form class="chat-input" id="chatForm">
+            <input id="chatText" type="text" autocomplete="off"
+              placeholder="Ask CodeNova AI anything…" aria-label="Message CodeNova AI" />
+            <button type="submit" class="chat-send" aria-label="Send">
+              <i data-lucide="arrow-up" style="width:18px;height:18px"></i>
+            </button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== FEATURES (with pictures) ===================== -->
+    <section style="padding:24px 0 64px;">
+      <div class="container">
+        <div class="reveal" style="text-align:center;max-width:660px;margin:0 auto 48px;">
+          <span class="eyebrow"><i data-lucide="layout-panel-left" style="width:15px;height:15px"></i> One workspace</span>
+          <h2 class="section-title" style="margin-top:18px;">Everything you need, beautifully in view</h2>
+          <p class="section-sub" style="margin:16px auto 0;">Hover any panel. The editor, dependency graph, and
+            refactoring engine all live inside CodeNova AI.</p>
+        </div>
+
+        <div class="grid features-grid">
+          <!-- Smart Editor -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">Editor · utils.py</span>
+            </div>
+            <div class="code">
+              <div class="lines">1<br>2<br>3<br>4<br>5<br>6</div>
+              <pre><code><span class="tok-key">def</span> <span class="tok-fn">merge_ranges</span>(ranges):
+    ranges.<span class="tok-fn">sort</span>()
+    out = [ranges[<span class="tok-num">0</span>]]
+    <span class="tok-key">for</span> lo, hi <span class="tok-key">in</span> ranges[<span class="tok-num">1</span>:]:
+        <span class="tok-com"># auto-completed by CodeNova</span>
+        <span class="tok-key">if</span> lo &lt;= out[-<span class="tok-num">1</span>][<span class="tok-num">1</span>]: ...</code></pre>
+            </div>
+            <div class="panel-caption"><strong>Smart Editor</strong> — AI completions, inline chat &amp; multi-cursor.</div>
+          </div>
+
+          <!-- Dependency Graph -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">Dependency Graph</span>
+            </div>
+            <div style="padding:22px;">
+              <svg viewBox="0 0 320 190" width="100%" height="170" fill="none" style="overflow:visible;">
+                <defs>
+                  <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#7C3AED" /><stop offset="1" stop-color="#B497CF" />
+                  </linearGradient>
+                </defs>
+                <line x1="160" y1="40" x2="70" y2="110" stroke="url(#edge)" stroke-width="2" />
+                <line x1="160" y1="40" x2="250" y2="110" stroke="url(#edge)" stroke-width="2" />
+                <line x1="70" y1="110" x2="45" y2="170" stroke="url(#edge)" stroke-width="2" />
+                <line x1="70" y1="110" x2="130" y2="170" stroke="url(#edge)" stroke-width="2" />
+                <line x1="250" y1="110" x2="250" y2="170" stroke="url(#edge)" stroke-width="2" />
+                <g font-family="JetBrains Mono" font-size="11" fill="#F4F1FA" text-anchor="middle">
+                  <g><circle cx="160" cy="40" r="26" fill="#1A1329" stroke="#A855F7" stroke-width="2" /><text x="160" y="44">app</text></g>
+                  <g><circle cx="70" cy="110" r="24" fill="#1A1329" stroke="#7C3AED" stroke-width="2" /><text x="70" y="114">auth</text></g>
+                  <g><circle cx="250" cy="110" r="24" fill="#1A1329" stroke="#7C3AED" stroke-width="2" /><text x="250" y="114">http</text></g>
+                  <g><circle cx="45" cy="170" r="18" fill="#140E20" stroke="#4C1D95" stroke-width="2" /><text x="45" y="174">db</text></g>
+                  <g><circle cx="130" cy="170" r="18" fill="#140E20" stroke="#4C1D95" stroke-width="2" /><text x="130" y="174">jwt</text></g>
+                  <g><circle cx="250" cy="170" r="18" fill="#140E20" stroke="#4C1D95" stroke-width="2" /><text x="250" y="174">ws</text></g>
+                </g>
+              </svg>
+            </div>
+            <div class="panel-caption"><strong>Dependency Graph</strong> — visualise how every module connects, live.</div>
+          </div>
+
+          <!-- Refactoring Engine -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">Refactor · Extract Method</span>
+            </div>
+            <div class="code" style="grid-template-columns:1fr;">
+              <pre style="border:none;"><code><span class="diff-del">- total = 0
+- for i in items: total += i.price</span>
+<span class="diff-add">+ total = sum_prices(items)</span>
+
+<span class="tok-key">def</span> <span class="tok-fn">sum_prices</span>(items):
+    <span class="tok-key">return</span> <span class="tok-fn">sum</span>(i.price <span class="tok-key">for</span> i <span class="tok-key">in</span> items)</code></pre>
+            </div>
+            <div class="panel-caption"><strong>Refactoring Engine</strong> — safe, one-click structural edits across files.</div>
+          </div>
+
+          <!-- Automated Git Push -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">Source Control · main</span>
+            </div>
+            <div class="git-panel mono">
+              <div class="git-row"><span class="ok">✓</span> feat: add auth middleware</div>
+              <div class="git-row"><span class="ok">✓</span> fix: rate-limit edge case</div>
+              <div class="git-row"><span class="ok">✓</span> chore: bump deps</div>
+              <div class="git-push"><i data-lucide="arrow-up" style="width:14px;height:14px"></i> Pushed 3 commits → origin/main</div>
+            </div>
+            <div class="panel-caption"><strong>Automated Git Push</strong> — stage, commit &amp; push without leaving the editor.</div>
+          </div>
+
+          <!-- Team Collaboration -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">app.tsx · 3 online</span>
+              <span style="margin-left:auto;display:flex;">
+                <span class="avatar" style="--c:#60a5fa">A</span>
+                <span class="avatar" style="--c:#f472b6">M</span>
+                <span class="avatar" style="--c:#34d399">S</span>
+              </span>
+            </div>
+            <div class="code">
+              <div class="lines">1<br>2<br>3<br>4<br>5</div>
+              <pre><code><span class="tok-key">export function</span> <span class="tok-fn">sync</span>(state) {
+  <span class="collab-tag" style="--c:#60a5fa">Ayesha</span>
+  <span class="tok-key">const</span> next = <span class="tok-fn">merge</span>(state);
+  <span class="collab-tag" style="--c:#f472b6">Musa</span>
+  <span class="tok-key">return</span> next;
+}</code></pre>
+            </div>
+            <div class="panel-caption"><strong>Team Collaboration</strong> — live shared editing with presence &amp; cursors.</div>
+          </div>
+
+          <!-- Code Intelligence -->
+          <div class="reveal window">
+            <div class="window-bar">
+              <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+              <span class="window-title mono">Code Intelligence</span>
+            </div>
+            <div class="code" style="position:relative;">
+              <div class="lines">1<br>2<br>3<br>4<br>5</div>
+              <pre><code><span class="tok-key">if</span> (<span class="tok-fn">verify</span>(token)) {
+  session.<span class="tok-fn">valid</span><span class="cursor-blink">&nbsp;</span>
+}</code></pre>
+              <div class="suggest">
+                <div class="suggest-item active"><i data-lucide="sparkles" style="width:12px;height:12px"></i> validateToken(token)</div>
+                <div class="suggest-item">verifySignature(token)</div>
+                <div class="suggest-item">refreshSession()</div>
+              </div>
+            </div>
+            <div class="panel-caption"><strong>Code Intelligence</strong> — context-aware completions &amp; inline chat.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== FINAL CTA ===================== -->
+    <section style="padding:64px 0 96px;overflow:hidden;">
+      <div class="glow brand-gradient" style="width:560px;height:420px;bottom:-200px;left:50%;transform:translateX(-50%);opacity:.4;"></div>
+      <div class="container reveal" style="position:relative;z-index:1;text-align:center;">
+        <h2 class="section-title" style="font-size:clamp(30px,5vw,52px);">Try CodeNova AI Now</h2>
+        <p class="section-sub" style="margin:18px auto 34px;">Download the desktop app for your platform and start
+          building in minutes.</p>
+        <a href="#" class="btn btn-primary btn-lg" data-download="auto" data-download-label-self
+          style="font-size:18px;padding:18px 40px;">
+          Download
+        </a>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-col" style="max-width:280px;">
+          <div class="nav-logo" style="margin-bottom:14px;">
+            <img src="images/logo_codenova.png" alt="CodeNova AI logo" style="width:30px;height:30px;" />
+            <span>CodeNova&nbsp;AI</span>
+          </div>
+          <p style="color:var(--muted);font-size:14px;margin:0;">The AI-native desktop code editor for developers and
+            teams who ship.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="products.html">Products</a>
+          <a href="requirements.html">Requirements</a>
+          <a href="#" data-download="auto"><span data-download-label>Download</span></a>
+        </div>
+        <div class="footer-col">
+          <h4>Platforms</h4>
+          <a href="products.html#macos">macOS</a>
+          <a href="products.html#windows">Windows</a>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <a href="requirements.html">System requirements</a>
+          <a href="requirements.html#about">About CodeNova AI</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 CodeNova AI. All rights reserved.</span>
+        <span class="flex" style="gap:18px;">
+          <a href="requirements.html" class="nav-link" style="padding:0;">Requirements</a>
+          <a href="products.html" class="nav-link" style="padding:0;">Products</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <style>
+    /* ---------- Hero split ---------- */
+    .hero-split {
+      display: grid;
+      grid-template-columns: 1fr 1.05fr;
+      gap: 56px;
+      align-items: center;
+      margin-top: 56px;
+    }
+    .hero-copy .lead { font-size: 20px; line-height: 1.6; color: var(--muted); margin: 0; }
+    #hero-app { position: relative; }
+
+    /* ---------- Floating feature bars (target-cursor targets) ---------- */
+    .float-bar {
+      position: absolute;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 10px 14px;
+      border-radius: 12px;
+      background: rgba(20, 14, 32, 0.86);
+      border: 1px solid var(--border-strong);
+      backdrop-filter: blur(10px);
+      box-shadow: 0 16px 40px -18px rgba(0, 0, 0, .8);
+      animation: floaty 6s ease-in-out infinite;
+      z-index: 3;
+    }
+    .float-bar:nth-of-type(3) { animation-delay: -1.5s; }
+    .float-bar:nth-of-type(4) { animation-delay: -3s; }
+    .float-bar:nth-of-type(5) { animation-delay: -4.5s; }
+    @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+    /* Freeze the bob while hovered so the target frame stays aligned */
+    .float-bar:hover { animation-play-state: paused; }
+
+    /* ---------- Working chat ---------- */
+    .chat-window { max-width: 720px; margin: 0 auto; }
+    .chat-body {
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      min-height: 200px;
+      max-height: 340px;
+      overflow-y: auto;
+    }
+    .chat-msg { max-width: 82%; padding: 11px 15px; border-radius: 14px; font-size: 14.5px; line-height: 1.5; }
+    .chat-msg.user {
+      align-self: flex-end;
+      background: linear-gradient(135deg, var(--violet), var(--violet-bright));
+      color: #fff;
+      border-bottom-right-radius: 4px;
+    }
+    .chat-msg.ai {
+      align-self: flex-start;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-bottom-left-radius: 4px;
+    }
+    .chat-dl { color: var(--violet-light); font-weight: 700; text-decoration: underline; cursor: pointer; }
+    .chat-dl:hover { color: var(--violet-bright); }
+    .chat-input { display: flex; gap: 10px; padding: 14px; border-top: 1px solid var(--border); background: rgba(255,255,255,0.015); }
+    .chat-input input {
+      flex: 1;
+      background: var(--bg-2);
+      border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      padding: 12px 14px;
+      color: var(--text);
+      font-size: 14.5px;
+      font-family: inherit;
+      outline: none;
+      transition: border-color .2s ease;
+    }
+    .chat-input input::placeholder { color: var(--muted); }
+    .chat-input input:focus { border-color: var(--violet); }
+    .chat-send {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 44px; border: none; border-radius: 10px; cursor: pointer;
+      background: linear-gradient(135deg, var(--violet), var(--violet-bright)); color: #fff;
+      transition: transform .15s ease, box-shadow .2s ease;
+    }
+    .chat-send:hover { transform: translateY(-1px); box-shadow: 0 8px 22px -8px rgba(168,85,247,.7); }
+    .dot-typing { display: inline-flex; gap: 4px; align-items: center; }
+    .dot-typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); display: inline-block; animation: blink-dot 1.2s infinite ease-in-out both; }
+    .dot-typing i:nth-child(2) { animation-delay: .2s; }
+    .dot-typing i:nth-child(3) { animation-delay: .4s; }
+    @keyframes blink-dot { 0%,80%,100% { opacity: .3; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-3px); } }
+
+    /* ---------- Feature grid pictures ---------- */
+    .features-grid { grid-template-columns: repeat(3, 1fr); gap: 22px; }
+    .panel-caption { padding: 14px 18px; border-top: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+    .panel-caption strong { color: var(--text); }
+    .diff-del { color: #f19a9a; } .diff-add { color: #86efac; }
+
+    .git-panel { padding: 18px; font-size: 12.5px; line-height: 2; min-height: 148px; }
+    .git-row { color: #d7d0e6; }
+    .git-row .ok { color: #86efac; margin-right: 8px; }
+    .git-push { margin-top: 10px; display: inline-flex; align-items: center; gap: 6px; color: #fff;
+      background: rgba(124,58,237,.18); border: 1px solid rgba(168,85,247,.35); padding: 5px 10px; border-radius: 8px; }
+
+    .avatar { width: 22px; height: 22px; border-radius: 50%; background: var(--c); color: #0b0710;
+      font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+      margin-left: -6px; border: 2px solid var(--surface); }
+    .collab-tag { display: inline-block; background: var(--c); color: #0b0710; font-size: 10px; font-weight: 700;
+      padding: 1px 6px; border-radius: 4px; vertical-align: middle; }
+
+    .suggest { position: absolute; left: 60px; top: 44px; width: 210px; background: var(--surface-2);
+      border: 1px solid var(--border-strong); border-radius: 10px; overflow: hidden; box-shadow: 0 20px 50px -18px rgba(0,0,0,.8); }
+    .suggest-item { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-size: 12.5px; color: var(--muted); }
+    .suggest-item.active { background: rgba(124,58,237,.22); color: #fff; }
+
+    /* ---------- Responsive ---------- */
+    @media (max-width: 900px) {
+      .hero-split { grid-template-columns: 1fr; gap: 40px; }
+      .hero-copy { text-align: center; }
+      .hero-copy p:last-child { justify-content: center; }
+      .features-grid { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) { .float-bar { display: none !important; } }
+    @media (prefers-reduced-motion: reduce) { .float-bar { animation: none; } }
+  </style>
+
+  <script src="assets/target-cursor.js"></script>
+  <script src="assets/chat.js"></script>
+  <script src="assets/site.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+
+</html>

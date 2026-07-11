@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Requirements — CodeNova AI</title>
+  <meta name="description"
+    content="System requirements for CodeNova AI on Windows and macOS, plus an overview of what the app does." />
+  <link rel="icon" href="images/logo_codenova.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+  <link rel="stylesheet" href="assets/site.css" />
+</head>
+
+<body>
+  <!-- ===================== HEADER ===================== -->
+  <header class="site-header">
+    <div class="container">
+      <nav class="nav">
+        <a href="index.html" class="nav-logo">
+          <img src="images/logo_codenova.png" alt="CodeNova AI logo" />
+          <span>CodeNova&nbsp;AI</span>
+        </a>
+        <div class="nav-menu">
+          <a href="requirements.html" class="nav-link active">Requirements</a>
+          <a href="products.html" class="nav-link">Products</a>
+        </div>
+        <div class="nav-actions">
+          <a href="#" class="btn btn-primary" data-download="auto">
+            <i data-lucide="download" style="width:18px;height:18px"></i>
+            <span data-download-label>Download</span>
+          </a>
+          <button class="nav-toggle" aria-label="Toggle menu"><i data-lucide="menu"></i></button>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===================== PAGE HERO ===================== -->
+    <section style="padding:72px 0 40px;overflow:hidden;">
+      <div class="glow brand-gradient" style="width:520px;height:520px;top:-240px;right:-140px;opacity:.4;"></div>
+      <div class="container reveal" style="position:relative;z-index:1;max-width:760px;">
+        <span class="eyebrow"><i data-lucide="cpu" style="width:15px;height:15px"></i> System requirements</span>
+        <h1 style="font-size:clamp(34px,5vw,56px);font-weight:800;margin-top:20px;">Will CodeNova AI run on your
+          machine?</h1>
+        <p class="section-sub" style="font-size:19px;margin-top:16px;">Here’s everything you need to know before you
+          install — what the app is, what it does, and the exact hardware and OS requirements for Windows and macOS.</p>
+      </div>
+    </section>
+
+    <!-- ===================== ABOUT ===================== -->
+    <section id="about" style="padding:24px 0 48px;">
+      <div class="container">
+        <div class="reveal card" style="padding:34px;max-width:900px;">
+          <span class="eyebrow"><i data-lucide="info" style="width:15px;height:15px"></i> What is CodeNova AI?</span>
+          <h2 class="section-title" style="font-size:30px;margin-top:16px;">An AI-native desktop code editor</h2>
+          <p style="color:var(--muted);font-size:17px;margin-top:14px;max-width:70ch;">
+            CodeNova AI is a fast, native desktop application that brings your editor, terminal, Git workflow, and an
+            AI assistant into a single workspace. It’s designed for solo developers and teams who want to move from
+            idea to shipped code without switching between a dozen tools.
+          </p>
+          <div class="grid about-grid">
+            <div><i data-lucide="brain-circuit" class="about-ico"></i>
+              <h3>AI assistant</h3>
+              <p>Inline completions, natural-language edits, and chat that understands your whole codebase.</p>
+            </div>
+            <div><i data-lucide="users" class="about-ico"></i>
+              <h3>Team collaboration</h3>
+              <p>Live shared sessions so teammates can edit, review, and pair in the same files in real time.</p>
+            </div>
+            <div><i data-lucide="wand-2" class="about-ico"></i>
+              <h3>Automated refactoring</h3>
+              <p>Rename, extract, and restructure safely, backed by a full project dependency model.</p>
+            </div>
+            <div><i data-lucide="git-branch" class="about-ico"></i>
+              <h3>Git &amp; dependency graph</h3>
+              <p>Built-in version control plus a live graph of how every module in your project connects.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== REQUIREMENTS TABLES ===================== -->
+    <section style="padding:24px 0 72px;">
+      <div class="container">
+        <div class="reveal" style="text-align:center;max-width:600px;margin:0 auto 40px;">
+          <h2 class="section-title">Minimum &amp; recommended specs</h2>
+          <p class="section-sub" style="margin:14px auto 0;">Pick your platform below.</p>
+        </div>
+
+        <div class="grid req-grid">
+          <!-- Windows -->
+          <div class="reveal card" id="windows" style="padding:30px;">
+            <div class="req-head">
+              <i data-lucide="monitor" style="width:26px;height:26px;color:var(--violet-light)"></i>
+              <h3 style="font-size:24px;">Windows</h3>
+            </div>
+            <table class="req-table">
+              <tr><th></th><th>Minimum</th><th>Recommended</th></tr>
+              <tr><td>OS</td><td>Windows 10 (64-bit)</td><td>Windows 11 (64-bit)</td></tr>
+              <tr><td>CPU</td><td>Dual-core 2.0 GHz</td><td>Quad-core 2.5 GHz+</td></tr>
+              <tr><td>RAM</td><td>4 GB</td><td>8 GB or more</td></tr>
+              <tr><td>Storage</td><td>2 GB free (SSD)</td><td>5 GB free (SSD)</td></tr>
+              <tr><td>Display</td><td>1280 × 720</td><td>1920 × 1080+</td></tr>
+              <tr><td>Network</td><td colspan="2">Internet connection for AI features &amp; collaboration</td></tr>
+            </table>
+            <a href="#" class="btn btn-primary" data-download="windows" style="margin-top:22px;width:100%;justify-content:center;">
+              <i data-lucide="download" style="width:18px;height:18px"></i> Download for Windows
+            </a>
+          </div>
+
+          <!-- macOS -->
+          <div class="reveal card" id="macos" style="padding:30px;">
+            <div class="req-head">
+              <i data-lucide="apple" style="width:26px;height:26px;color:var(--violet-light)"></i>
+              <h3 style="font-size:24px;">macOS</h3>
+            </div>
+            <table class="req-table">
+              <tr><th></th><th>Minimum</th><th>Recommended</th></tr>
+              <tr><td>OS</td><td>macOS 11 Big Sur</td><td>macOS 13 Ventura+</td></tr>
+              <tr><td>Chip</td><td>Intel or Apple Silicon</td><td>Apple Silicon (M1+)</td></tr>
+              <tr><td>RAM</td><td>4 GB</td><td>8 GB or more</td></tr>
+              <tr><td>Storage</td><td>2 GB free</td><td>5 GB free</td></tr>
+              <tr><td>Display</td><td>1280 × 800</td><td>Retina display</td></tr>
+              <tr><td>Network</td><td colspan="2">Internet connection for AI features &amp; collaboration</td></tr>
+            </table>
+            <a href="#" class="btn btn-primary" data-download="mac" style="margin-top:22px;width:100%;justify-content:center;">
+              <i data-lucide="download" style="width:18px;height:18px"></i> Download for macOS
+            </a>
+          </div>
+        </div>
+
+        <p class="reveal" style="text-align:center;color:var(--muted);font-size:14px;margin-top:28px;">
+          <i data-lucide="check-circle-2" style="width:15px;height:15px;vertical-align:-2px;color:var(--violet-light)"></i>
+          Free for individuals · No account required to install
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-col" style="max-width:280px;">
+          <div class="nav-logo" style="margin-bottom:14px;">
+            <img src="images/logo_codenova.png" alt="CodeNova AI logo" style="width:30px;height:30px;" />
+            <span>CodeNova&nbsp;AI</span>
+          </div>
+          <p style="color:var(--muted);font-size:14px;margin:0;">The AI-native desktop code editor for developers and
+            teams who ship.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="products.html">Products</a>
+          <a href="requirements.html">Requirements</a>
+          <a href="#" data-download="auto"><span data-download-label>Download</span></a>
+        </div>
+        <div class="footer-col">
+          <h4>Platforms</h4>
+          <a href="products.html#macos">macOS</a>
+          <a href="products.html#windows">Windows</a>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <a href="requirements.html">System requirements</a>
+          <a href="requirements.html#about">About CodeNova AI</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 CodeNova AI. All rights reserved.</span>
+        <span class="flex" style="gap:18px;">
+          <a href="requirements.html" class="nav-link" style="padding:0;">Requirements</a>
+          <a href="products.html" class="nav-link" style="padding:0;">Products</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <style>
+    .about-grid { grid-template-columns: repeat(2, 1fr); gap: 22px 28px; margin-top: 28px; }
+    .about-ico { width: 22px; height: 22px; color: var(--violet-light); margin-bottom: 8px; }
+    .about-grid h3 { font-size: 17px; margin-bottom: 6px; }
+    .about-grid p { color: var(--muted); font-size: 15px; margin: 0; }
+
+    .req-grid { grid-template-columns: repeat(2, 1fr); gap: 24px; }
+    .req-head { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    .req-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    .req-table th, .req-table td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .req-table th { color: var(--muted); font-weight: 600; font-size: 13px; }
+    .req-table td:first-child { color: var(--muted); font-weight: 600; width: 90px; }
+    .req-table tr:last-child td { border-bottom: none; }
+
+    @media (max-width: 820px) {
+      .about-grid, .req-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+  <script src="assets/site.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+
+</html>

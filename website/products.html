@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Products — CodeNova AI</title>
+  <meta name="description"
+    content="CodeNova AI for macOS and Windows. See the app in action and download the build for your platform." />
+  <link rel="icon" href="images/logo_codenova.png" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    rel="stylesheet" />
+
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js"></script>
+
+  <link rel="stylesheet" href="assets/site.css" />
+</head>
+
+<body>
+  <!-- ===================== HEADER ===================== -->
+  <header class="site-header">
+    <div class="container">
+      <nav class="nav">
+        <a href="index.html" class="nav-logo">
+          <img src="images/logo_codenova.png" alt="CodeNova AI logo" />
+          <span>CodeNova&nbsp;AI</span>
+        </a>
+        <div class="nav-menu">
+          <a href="requirements.html" class="nav-link">Requirements</a>
+          <a href="products.html" class="nav-link active">Products</a>
+        </div>
+        <div class="nav-actions">
+          <a href="#" class="btn btn-primary" data-download="auto">
+            <i data-lucide="download" style="width:18px;height:18px"></i>
+            <span data-download-label>Download</span>
+          </a>
+          <button class="nav-toggle" aria-label="Toggle menu"><i data-lucide="menu"></i></button>
+        </div>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===================== PAGE HERO ===================== -->
+    <section style="padding:72px 0 32px;overflow:hidden;">
+      <div class="glow brand-gradient" style="width:520px;height:520px;top:-260px;left:-120px;opacity:.4;"></div>
+      <div class="container reveal" style="position:relative;z-index:1;max-width:760px;">
+        <span class="eyebrow"><i data-lucide="package" style="width:15px;height:15px"></i> Products</span>
+        <h1 style="font-size:clamp(34px,5vw,56px);font-weight:800;margin-top:20px;">CodeNova AI for every desktop</h1>
+        <p class="section-sub" style="font-size:19px;margin-top:16px;">The same powerful, AI-native editor — tuned
+          natively for macOS and Windows. See it in action, then grab your build.</p>
+        <div class="flex" style="gap:12px;margin-top:26px;flex-wrap:wrap;">
+          <a href="#macos" class="btn btn-ghost"><i data-lucide="apple" style="width:18px;height:18px"></i> macOS</a>
+          <a href="#windows" class="btn btn-ghost"><i data-lucide="monitor" style="width:18px;height:18px"></i> Windows</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== macOS PRODUCT ===================== -->
+    <section id="macos" style="padding:56px 0;">
+      <div class="container grid product-row">
+        <div class="reveal product-copy">
+          <span class="eyebrow"><i data-lucide="apple" style="width:15px;height:15px"></i> CodeNova AI for macOS</span>
+          <h2 class="section-title" style="margin-top:16px;">Native on Apple Silicon</h2>
+          <p class="section-sub" style="margin-top:14px;">Built for Big Sur and later, universal for Intel and M-series
+            chips. Buttery-smooth scrolling, native menus, and full Retina crispness.</p>
+          <ul class="product-list">
+            <li><i data-lucide="check" class="li-ico"></i> Universal binary — Intel &amp; Apple Silicon</li>
+            <li><i data-lucide="check" class="li-ico"></i> Native macOS menus, shortcuts &amp; notifications</li>
+            <li><i data-lucide="check" class="li-ico"></i> Signed &amp; notarized <span class="mono">.dmg</span></li>
+          </ul>
+          <a href="#" class="btn btn-primary btn-lg" data-download="mac" style="margin-top:24px;">
+            <i data-lucide="download" style="width:18px;height:18px"></i> Download for macOS
+          </a>
+          <p style="color:var(--muted);font-size:13px;margin-top:12px;">macOS 11+ · Universal · ~135 MB</p>
+        </div>
+
+        <!-- macOS "screenshot" -->
+        <div class="reveal window product-shot">
+          <div class="window-bar">
+            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <span class="window-title mono">CodeNova AI — macOS</span>
+          </div>
+          <div class="shot-body">
+            <div class="shot-side">
+              <div class="side-item active"><i data-lucide="file-code"></i> app.ts</div>
+              <div class="side-item"><i data-lucide="file-code"></i> auth.ts</div>
+              <div class="side-item"><i data-lucide="folder"></i> routes</div>
+              <div class="side-item"><i data-lucide="git-branch"></i> main</div>
+            </div>
+            <div class="code" style="border-left:1px solid var(--border);">
+              <div class="lines">1<br>2<br>3<br>4<br>5</div>
+              <pre><code><span class="tok-key">const</span> app = <span class="tok-fn">createApp</span>();
+<span class="tok-key">await</span> app.<span class="tok-fn">load</span>(<span class="tok-str">'./config'</span>);
+<span class="tok-com">// ⌘K to edit with AI</span>
+app.<span class="tok-fn">mount</span>(<span class="tok-str">'#root'</span>);
+app.<span class="tok-fn">start</span>();</code></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="container"><hr style="border:none;border-top:1px solid var(--border);" /></div>
+
+    <!-- ===================== Windows PRODUCT ===================== -->
+    <section id="windows" style="padding:56px 0;">
+      <div class="container grid product-row reverse">
+        <div class="reveal product-copy">
+          <span class="eyebrow"><i data-lucide="monitor" style="width:15px;height:15px"></i> CodeNova AI for Windows</span>
+          <h2 class="section-title" style="margin-top:16px;">Fast on Windows 10 &amp; 11</h2>
+          <p class="section-sub" style="margin-top:14px;">A true native app with a familiar installer. GPU-accelerated
+            rendering keeps large repositories smooth on everything from laptops to workstations.</p>
+          <ul class="product-list">
+            <li><i data-lucide="check" class="li-ico"></i> 64-bit Windows 10 &amp; 11</li>
+            <li><i data-lucide="check" class="li-ico"></i> One-click <span class="mono">.exe</span> installer</li>
+            <li><i data-lucide="check" class="li-ico"></i> GPU-accelerated editor &amp; auto-updates</li>
+          </ul>
+          <a href="#" class="btn btn-primary btn-lg" data-download="windows" style="margin-top:24px;">
+            <i data-lucide="download" style="width:18px;height:18px"></i> Download for Windows
+          </a>
+          <p style="color:var(--muted);font-size:13px;margin-top:12px;">Windows 10/11 · 64-bit · ~140 MB</p>
+        </div>
+
+        <!-- Windows "screenshot" -->
+        <div class="reveal window product-shot">
+          <div class="window-bar">
+            <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+            <span class="window-title mono">CodeNova AI — Windows</span>
+          </div>
+          <div class="shot-body">
+            <div class="shot-side">
+              <div class="side-item active"><i data-lucide="file-code"></i> main.py</div>
+              <div class="side-item"><i data-lucide="file-code"></i> utils.py</div>
+              <div class="side-item"><i data-lucide="folder"></i> tests</div>
+              <div class="side-item"><i data-lucide="terminal"></i> terminal</div>
+            </div>
+            <div class="code" style="border-left:1px solid var(--border);">
+              <div class="lines">1<br>2<br>3<br>4<br>5</div>
+              <pre><code><span class="tok-key">def</span> <span class="tok-fn">main</span>():
+    data = <span class="tok-fn">load</span>(<span class="tok-str">"input.json"</span>)
+    <span class="tok-com"># Ctrl+K to refactor</span>
+    <span class="tok-key">return</span> <span class="tok-fn">process</span>(data)
+<span class="tok-fn">main</span>()</code></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CTA ===================== -->
+    <section style="padding:48px 0 88px;overflow:hidden;">
+      <div class="glow brand-gradient" style="width:560px;height:400px;bottom:-200px;left:50%;transform:translateX(-50%);opacity:.4;"></div>
+      <div class="container reveal" style="position:relative;z-index:1;text-align:center;">
+        <h2 class="section-title" style="font-size:clamp(28px,4vw,44px);">Try CodeNova AI Now</h2>
+        <p class="section-sub" style="margin:16px auto 30px;">Not sure which one? We’ll pick the right build for your
+          device automatically.</p>
+        <a href="#" class="btn btn-primary btn-lg" data-download="auto" data-download-label-self
+          style="font-size:17px;padding:16px 36px;">Download</a>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-col" style="max-width:280px;">
+          <div class="nav-logo" style="margin-bottom:14px;">
+            <img src="images/logo_codenova.png" alt="CodeNova AI logo" style="width:30px;height:30px;" />
+            <span>CodeNova&nbsp;AI</span>
+          </div>
+          <p style="color:var(--muted);font-size:14px;margin:0;">The AI-native desktop code editor for developers and
+            teams who ship.</p>
+        </div>
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="products.html">Products</a>
+          <a href="requirements.html">Requirements</a>
+          <a href="#" data-download="auto"><span data-download-label>Download</span></a>
+        </div>
+        <div class="footer-col">
+          <h4>Platforms</h4>
+          <a href="products.html#macos">macOS</a>
+          <a href="products.html#windows">Windows</a>
+        </div>
+        <div class="footer-col">
+          <h4>Resources</h4>
+          <a href="requirements.html">System requirements</a>
+          <a href="requirements.html#about">About CodeNova AI</a>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 CodeNova AI. All rights reserved.</span>
+        <span class="flex" style="gap:18px;">
+          <a href="requirements.html" class="nav-link" style="padding:0;">Requirements</a>
+          <a href="products.html" class="nav-link" style="padding:0;">Products</a>
+        </span>
+      </div>
+    </div>
+  </footer>
+
+  <style>
+    .product-row { grid-template-columns: 1fr 1.1fr; gap: 48px; align-items: center; }
+    .product-row.reverse .product-copy { order: 2; }
+    .product-row.reverse .product-shot { order: 1; }
+    .product-list { list-style: none; padding: 0; margin: 22px 0 0; }
+    .product-list li { display: flex; align-items: center; gap: 10px; padding: 7px 0; color: var(--text); font-size: 15px; }
+    .li-ico { width: 18px; height: 18px; color: var(--violet-light); flex-shrink: 0; }
+
+    .shot-body { display: grid; grid-template-columns: 150px 1fr; min-height: 220px; }
+    .shot-side { padding: 14px 10px; background: rgba(255,255,255,0.015); border-right: 1px solid var(--border); }
+    .side-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 8px; color: var(--muted); font-size: 13px; }
+    .side-item i { width: 15px; height: 15px; }
+    .side-item.active { background: rgba(124,58,237,0.15); color: var(--text); }
+
+    @media (max-width: 860px) {
+      .product-row, .product-row.reverse { grid-template-columns: 1fr; }
+      .product-row.reverse .product-copy, .product-row.reverse .product-shot { order: initial; }
+      .shot-body { grid-template-columns: 120px 1fr; }
+    }
+    @media (max-width: 520px) {
+      .shot-side { display: none; }
+      .shot-body { grid-template-columns: 1fr; }
+    }
+  </style>
+  <script src="assets/site.js"></script>
+  <script>lucide.createIcons();</script>
+</body>
+
+</html>
