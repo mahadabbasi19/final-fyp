@@ -361,15 +361,60 @@ class JavaSyntaxChecker:
 
     # ── Public API ────────────────────────────────────────────────
 
-    def check_syntax(self, code: str) -> List[JavaError]:
+    def check_syntax(self, code: str, sourcepath: Optional[str] = None) -> List[JavaError]:
         """Return syntax errors for *code*.
 
-        Delegates to ``javac`` when available; falls back to
-        ``_regex_syntax_check`` otherwise.
+        Delegates to ``javac`` when available (with cross-file resolution
+        when *sourcepath* is given); otherwise uses the javalang parser for
+        exact syntax errors plus regex heuristics for extra detail.
         """
         if not self._javac_path:
-            return self._regex_syntax_check(code)
+            errors = self._javalang_syntax_check(code)
+            if errors:
+                # Parser pinpointed the failure — regex bracket noise would
+                # only duplicate/contradict it.
+                errors.extend(self._check_type_mismatches(code.split("\n")))
+                return errors
+            # Parses cleanly: only run the cheap semantic heuristics.
+            return self._check_type_mismatches(code.split("\n"))
+        return self._check_syntax_javac(code, sourcepath=sourcepath)
 
+    @staticmethod
+    def _javalang_syntax_check(code: str) -> List[JavaError]:
+        """Exact syntax validation via the javalang parser (no JDK needed).
+
+        Replaces the old regex-only fallback, which missed malformed
+        constructs and mis-flagged valid code. javalang reports the precise
+        token where parsing failed.
+        """
+        try:
+            import javalang
+            javalang.parse.parse(code)
+            return []
+        except Exception as exc:
+            line, column = 1, 1
+            message = "Syntax error"
+            at = getattr(exc, "at", None)
+            pos = getattr(at, "position", None) if at is not None else None
+            if pos is not None:
+                line, column = pos[0], pos[1]
+            desc = getattr(exc, "description", None) or str(exc)
+            if desc:
+                message = f"Syntax error: {desc}"
+            token_val = getattr(at, "value", None) if at is not None else None
+            if token_val:
+                message += f" (near '{token_val}')"
+            return [JavaError(
+                line=line, column=column,
+                error_type=ErrorType.SYNTAX, severity=ErrorSeverity.ERROR,
+                message=message,
+                suggestion="Fix the syntax at the indicated position",
+            )]
+
+    def _check_syntax_javac(self, code: str, sourcepath: Optional[str] = None) -> List[JavaError]:
+        """javac-backed check. With *sourcepath* (the workspace root), javac
+        resolves references to the project's other classes, enabling REAL
+        cross-file diagnostics instead of suppressing them."""
         class_name = self._extract_class_name(code)
         if not class_name:
             class_name = "TempClass"
@@ -379,17 +424,25 @@ class JavaSyntaxChecker:
         temp_file = os.path.join(self._temp_dir, f"{class_name}.java")
         errors: List[JavaError] = []
 
+        cmd = [self._javac_path, "-Xlint:all"]
+        if sourcepath and os.path.isdir(sourcepath):
+            cmd += ["-sourcepath", sourcepath, "-implicit:none"]
+        cmd.append(temp_file)
+
         try:
             with open(temp_file, "w", encoding="utf-8") as fh:
                 fh.write(code)
 
             result = subprocess.run(
-                [self._javac_path, "-Xlint:all", temp_file],
+                cmd,
                 capture_output=True,
                 text=True,
-                timeout=10,  # 3s timed out on larger files, producing noise warnings
+                timeout=15,
             )
-            errors.extend(self._parse_javac_output(result.stderr, code))
+            errors.extend(self._parse_javac_output(
+                result.stderr, code,
+                cross_file_resolved=bool(sourcepath),
+            ))
 
         except subprocess.TimeoutExpired:
             errors.append(JavaError(
@@ -422,7 +475,10 @@ class JavaSyntaxChecker:
         r".*\.java:(\d+):\s*(error|warning):\s*(.+)"
     )
 
-    def _parse_javac_output(self, output: str, original_code: str) -> List[JavaError]:
+    def _parse_javac_output(
+        self, output: str, original_code: str,
+        cross_file_resolved: bool = False,
+    ) -> List[JavaError]:
         """Parse ``javac`` stderr into structured ``JavaError`` objects.
 
         ``javac`` emits blocks of the form::
@@ -455,11 +511,11 @@ class JavaSyntaxChecker:
                 if i + 2 < len(lines) and "^" in lines[i + 2]:
                     column = lines[i + 2].index("^") + 1
 
-                # Skip cross-file dependency errors: "cannot find symbol"
-                # for class/type references are not real errors in the
-                # current file — they just mean the other .java files
-                # are not on the classpath during single-file compilation.
-                if "cannot find symbol" in message:
+                # Cross-file "cannot find symbol": only suppress when we
+                # compiled WITHOUT a sourcepath (single-file mode, where
+                # missing project classes are expected). With -sourcepath
+                # the reference genuinely doesn't exist — report it.
+                if "cannot find symbol" in message and not cross_file_resolved:
                     # Peek ahead for the "symbol: class ..." detail line
                     is_class_dep = False
                     for peek in range(i + 1, min(i + 5, len(lines))):
@@ -780,13 +836,26 @@ class RuntimeErrorDetector:
 
     # ── Public entry ──────────────────────────────────────────────
 
+    _METHOD_START_RE = re.compile(
+        r'(?:public|private|protected|static|final|synchronized|\s)+[\w\<\>\[\]]+\s+\w+\s*\([^)]*\)\s*(?:throws[^{]+)?\{'
+    )
+    _NEW_ARRAY_RE = re.compile(r'(\w+)\s*=\s*new\s+\w+\s*\[\s*(\d+)\s*\]')
+
     def detect_runtime_errors(self, code: str) -> List[JavaError]:
-        """Run all runtime-risk heuristics and return findings."""
+        """Run all runtime-risk heuristics and return findings.
+
+        Variable state is SCOPED PER METHOD: hitting a new method signature
+        resets declaration/initialisation tracking. The previous file-linear
+        tracking bled state between methods (a variable declared-but-null in
+        method A poisoned an identically named, initialised variable in
+        method B), causing false NullPointerException warnings.
+        """
         errors: List[JavaError] = []
         lines = code.split("\n")
 
         declared_vars: Dict[str, int] = {}
         initialised_vars: Set[str] = set()
+        array_sizes: Dict[str, int] = {}
         in_multiline = False
 
         for i, raw in enumerate(lines, 1):
@@ -800,8 +869,21 @@ class RuntimeErrorDetector:
             if "//" in line:
                 line = line[: line.index("//")]
 
+            # New method → fresh scope.
+            if self._METHOD_START_RE.search(line):
+                declared_vars = {}
+                initialised_vars = set()
+                array_sizes = {}
+
+            # Track literal array allocations: int[] a = new int[5];
+            for m in self._NEW_ARRAY_RE.finditer(line):
+                try:
+                    array_sizes[m.group(1)] = int(m.group(2))
+                except ValueError:
+                    pass
+
             errors.extend(self._check_null_pointer(line, i, declared_vars, initialised_vars))
-            errors.extend(self._check_array_bounds(line, i))
+            errors.extend(self._check_array_bounds(line, i, array_sizes))
             errors.extend(self._check_division_by_zero(line, i))
             errors.extend(self._check_integer_overflow(line, i))
             errors.extend(self._check_resource_leaks(line, i, code))
@@ -833,16 +915,26 @@ class RuntimeErrorDetector:
     _ARRAY_ACCESS_RE = re.compile(r"(\w+)\[(\d+)]")
     _NEG_INDEX_RE    = re.compile(r"(\w+)\[(\w+)\s*-\s*\d+]")
 
-    def _check_array_bounds(self, line: str, line_num: int) -> List[JavaError]:
+    def _check_array_bounds(
+        self, line: str, line_num: int,
+        array_sizes: Optional[Dict[str, int]] = None,
+    ) -> List[JavaError]:
+        """Flag literal indices PROVABLY out of bounds for arrays whose size
+        is known from a literal `new T[N]` in the same method. The old
+        heuristic ("index > 100 is suspicious") produced pure noise: it
+        flagged valid accesses and missed real ones like arr[10] on new
+        int[5]. This version only reports certainties."""
         errors: List[JavaError] = []
+        sizes = array_sizes or {}
         for m in self._ARRAY_ACCESS_RE.finditer(line):
-            idx = int(m.group(2))
-            if idx > 100:
+            name, idx = m.group(1), int(m.group(2))
+            if name in sizes and idx >= sizes[name]:
                 errors.append(JavaError(
                     line=line_num, column=m.start() + 1,
-                    error_type=ErrorType.RUNTIME, severity=ErrorSeverity.WARNING,
-                    message=f"Large array index {idx} – ensure array is properly sized",
-                    suggestion="Consider using dynamic sizing or bounds checking",
+                    error_type=ErrorType.RUNTIME, severity=ErrorSeverity.ERROR,
+                    message=(f"ArrayIndexOutOfBoundsException: index {idx} on "
+                             f"'{name}' of length {sizes[name]}"),
+                    suggestion=f"Valid indices for '{name}' are 0..{sizes[name] - 1}",
                 ))
         for m in self._NEG_INDEX_RE.finditer(line):
             errors.append(JavaError(
@@ -1323,18 +1415,22 @@ class ErrorChecker:
 
     # ── Synchronous check (public) ────────────────────────────────
 
-    def check_code(self, code: str, include_warnings: bool = True) -> List[JavaError]:
+    def check_code(
+        self, code: str, include_warnings: bool = True,
+        sourcepath: Optional[str] = None,
+    ) -> List[JavaError]:
         """Synchronously analyse *code* and return all findings.
 
         Layers executed:
-        1. Syntax errors (``javac`` or regex fallback).
+        1. Syntax errors (``javac`` with optional project *sourcepath* for
+           cross-file resolution; javalang parser fallback without a JDK).
         2. Runtime-risk warnings (static heuristics).
         3. Code-smell / static-analysis warnings (if *include_warnings*).
         """
         all_errors: List[JavaError] = []
 
         # Layer 1 – syntax
-        all_errors.extend(self.syntax_checker.check_syntax(code))
+        all_errors.extend(self.syntax_checker.check_syntax(code, sourcepath=sourcepath))
 
         # Layer 2 – runtime risk heuristics
         all_errors.extend(self.runtime_detector.detect_runtime_errors(code))

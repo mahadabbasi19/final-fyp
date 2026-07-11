@@ -16,7 +16,7 @@ Run: python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 import json
 import os
 import re
@@ -119,6 +119,10 @@ class AnalysisRequest(BaseModel):
 class ErrorCheckRequest(BaseModel):
     """Request model for error checking endpoint."""
     java_code: str
+    # Workspace root: enables javac cross-file symbol resolution
+    # (-sourcepath) so references to the project's other classes are
+    # genuinely checked instead of suppressed.
+    project_root: Optional[str] = None
     
     class Config:
         example = {
@@ -446,7 +450,10 @@ async def check_errors(request: ErrorCheckRequest):
         error_checker = ErrorChecker()
         
         # Check for all errors at once (ErrorChecker.check_code returns combined list)
-        all_errors = error_checker.check_code(request.java_code, include_warnings=True)
+        all_errors = error_checker.check_code(
+            request.java_code, include_warnings=True,
+            sourcepath=request.project_root,
+        )
         
         # Convert and split by error_type
         def convert_error(error: JavaError) -> JavaErrorResponse:
@@ -903,8 +910,31 @@ async def rename_symbol(request: RenameSymbolRequest):
         if old_name == new_name:
             return {"modified_files": [], "count": 0}
 
-        # Word-boundary regex for the symbol
+        # Word-boundary regex for the symbol — applied ONLY outside string
+        # literals, char literals, and comments. The previous version renamed
+        # occurrences inside "strings" and // comments, silently changing
+        # program output and documentation.
         pattern = re.compile(r'\b' + re.escape(old_name) + r'\b')
+        protected = re.compile(
+            r'("(?:[^"\\\n]|\\.)*"'      # string literal
+            r"|'(?:[^'\\\n]|\\.)*'"      # char literal
+            r'|//[^\n]*'                  # line comment
+            r'|/\*.*?\*/)',               # block comment
+            re.DOTALL,
+        )
+
+        def rename_outside_literals(content: str) -> Tuple[str, int]:
+            out: List[str] = []
+            total = 0
+            last = 0
+            for m in protected.finditer(content):
+                seg, n = pattern.subn(new_name, content[last:m.start()])
+                out.append(seg); total += n
+                out.append(m.group(0))          # literal/comment untouched
+                last = m.end()
+            seg, n = pattern.subn(new_name, content[last:])
+            out.append(seg); total += n
+            return ''.join(out), total
 
         java_files = glob_mod.glob(os.path.join(root, '**', '*.java'), recursive=True)
         modified = []
@@ -913,7 +943,7 @@ async def rename_symbol(request: RenameSymbolRequest):
             try:
                 with open(fp, 'r', encoding='utf-8') as f:
                     content = f.read()
-                new_content, count = pattern.subn(new_name, content)
+                new_content, count = rename_outside_literals(content)
                 if count > 0:
                     with open(fp, 'w', encoding='utf-8') as f:
                         f.write(new_content)

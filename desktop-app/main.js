@@ -698,8 +698,8 @@ ipcMain.handle('backend:analyze', async (event, { java_code }) => {
   return await backendFetch('/analyze', 'POST', { java_code });
 });
 
-ipcMain.handle('backend:checkErrors', async (event, { java_code }) => {
-  return await backendFetch('/check-errors', 'POST', { java_code });
+ipcMain.handle('backend:checkErrors', async (event, { java_code, project_root }) => {
+  return await backendFetch('/check-errors', 'POST', { java_code, project_root });
 });
 
 ipcMain.handle('backend:stats', async () => {

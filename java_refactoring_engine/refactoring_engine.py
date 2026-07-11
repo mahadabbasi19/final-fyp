@@ -304,22 +304,32 @@ class BehaviorPreservationProtocol:
         if len(errors_after) > len(errors_before):
             new_errors.append(f"Error count increased from {len(errors_before)} to {len(errors_after)}")
 
-        # 5. Best-effort compile-equivalence. If the original compiled with
-        # javac, the refactored must also compile. Skipped silently when
-        # javac is not on PATH (most end-user machines).
-        compile_issue = self._javac_compile_equivalence(original, refactored)
+        # 5. Best-effort compile-equivalence + compiled-API diff. If the
+        # original compiled with javac, the refactored must also compile,
+        # AND its compiled member surface (via javap) must not lose any
+        # member the original had — a bytecode-level guard that catches
+        # semantic drift a source-level regex can miss. Skipped silently
+        # when no JDK is installed.
+        compile_issue = self._javac_compile_equivalence(
+            original, refactored, allowed_removals=allowed_removals,
+        )
         if compile_issue:
             new_errors.append(compile_issue)
 
         return (len(new_errors) == 0, new_errors)
 
     @staticmethod
-    def _javac_compile_equivalence(original: str, refactored: str) -> Optional[str]:
-        """Compile both versions if javac is available; surface diverging results.
+    def _javac_compile_equivalence(
+        original: str,
+        refactored: str,
+        allowed_removals: Optional[Set[str]] = None,
+    ) -> Optional[str]:
+        """Compile both versions; compare compiled member surfaces via javap.
 
-        Returns None on equivalence (or when the check cannot be run).
-        Returns a human-readable rollback reason when the refactor broke a
-        previously-compiling file.
+        Returns None on equivalence (or when the check cannot run).
+        Returns a rollback reason when the refactor (a) broke compilation
+        that previously worked, or (b) dropped a compiled member (method /
+        field signature) that isn't in *allowed_removals*.
         """
         import os
         import shutil
@@ -327,35 +337,67 @@ class BehaviorPreservationProtocol:
         import tempfile
 
         javac = shutil.which('javac')
+        javap = shutil.which('javap')
         if not javac:
             return None  # Tool not installed — can't run the check.
 
-        def _compile(source: str) -> Tuple[bool, str]:
-            # Class name is required to match `javac` expectations.
+        _MEMBER_RE = re.compile(r'^\s*(?:public|protected|private|static|final|abstract|synchronized|native|\s)+[\w\<\>\[\], \.]+\s[\w$]+\(.*\);\s*$|^\s*(?:public|protected|private|static|final|volatile|transient|\s)+[\w\<\>\[\], \.]+\s[\w$]+;\s*$')
+
+        def _compile_and_api(source: str, tmp: str) -> Tuple[bool, str, Set[str]]:
             m = re.search(r'\b(?:public\s+)?(?:final\s+)?(?:abstract\s+)?class\s+(\w+)', source)
             cls = m.group(1) if m else 'Snippet'
-            with tempfile.TemporaryDirectory() as tmp:
-                path = os.path.join(tmp, f'{cls}.java')
-                try:
-                    with open(path, 'w', encoding='utf-8') as f:
-                        f.write(source)
-                    proc = subprocess.run(
-                        [javac, '-d', tmp, path],
-                        capture_output=True, text=True, timeout=15,
-                    )
-                    return proc.returncode == 0, proc.stderr or proc.stdout
-                except subprocess.TimeoutExpired:
-                    return False, 'javac timed out'
-                except Exception as exc:
-                    return False, str(exc)
+            path = os.path.join(tmp, f'{cls}.java')
+            try:
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.write(source)
+                proc = subprocess.run(
+                    [javac, '-d', tmp, path],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if proc.returncode != 0:
+                    return False, proc.stderr or proc.stdout, set()
+                api: Set[str] = set()
+                if javap:
+                    for fn in os.listdir(tmp):
+                        if not fn.endswith('.class'):
+                            continue
+                        jp = subprocess.run(
+                            [javap, '-p', os.path.join(tmp, fn)],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        for line in (jp.stdout or '').splitlines():
+                            if _MEMBER_RE.match(line):
+                                api.add(line.strip())
+                return True, '', api
+            except subprocess.TimeoutExpired:
+                return False, 'javac timed out', set()
+            except Exception as exc:
+                return False, str(exc), set()
 
-        orig_ok, _ = _compile(original)
-        if not orig_ok:
-            return None  # Original was already broken — out of scope for this guard.
-        ref_ok, ref_err = _compile(refactored)
-        if not ref_ok:
-            tail = (ref_err or '').strip().splitlines()[-1:] or ['javac error']
-            return f"Refactor broke compilation that worked before: {tail[0][:200]}"
+        try:
+            with tempfile.TemporaryDirectory() as t1, tempfile.TemporaryDirectory() as t2:
+                orig_ok, _, orig_api = _compile_and_api(original, t1)
+                if not orig_ok:
+                    return None  # Original already broken — out of scope.
+                ref_ok, ref_err, ref_api = _compile_and_api(refactored, t2)
+                if not ref_ok:
+                    tail = (ref_err or '').strip().splitlines()[-1:] or ['javac error']
+                    return f"Refactor broke compilation that worked before: {tail[0][:200]}"
+                # API-surface diff: additions (extracted helpers) are fine;
+                # removals must be explicitly sanctioned.
+                if orig_api and ref_api:
+                    removed = orig_api - ref_api
+                    allowed = allowed_removals or set()
+                    removed = {
+                        r for r in removed
+                        if not any(f' {name}(' in r or f' {name};' in r for name in allowed)
+                    }
+                    if removed:
+                        example = next(iter(removed))
+                        return (f"Compiled API lost {len(removed)} member(s), e.g. "
+                                f"'{example[:120]}' — rolling back")
+        except Exception:
+            return None  # Never let the guard's own failure block a refactor.
         return None
 
     def safe_apply(
@@ -1220,6 +1262,28 @@ class DuplicateDetector:
                     'lines2': b[1],
                 })
 
+        # Reordered-clone pass: same statements, different order. Sequence
+        # matching misses these by construction; a statement-multiset
+        # comparison is order-insensitive.
+        for i in range(len(fingerprints)):
+            for j in range(i + 1, len(fingerprints)):
+                a, b = fingerprints[i], fingerprints[j]
+                pair = tuple(sorted([a[0], b[0]]))
+                if pair in seen_pairs:
+                    continue
+                ms_a = self._statement_multiset(a[2].split(' '))
+                ms_b = self._statement_multiset(b[2].split(' '))
+                if len(ms_a) >= 3 and self._multiset_similarity(ms_a, ms_b) >= 0.9:
+                    seen_pairs.add(pair)
+                    duplicates.append({
+                        'method1': a[0],
+                        'method2': b[0],
+                        'similarity': 0.9,
+                        'kind': 'reordered',
+                        'lines1': a[1],
+                        'lines2': b[1],
+                    })
+
         # Highest similarity first.
         duplicates.sort(key=lambda d: -d['similarity'])
         return duplicates
@@ -1298,7 +1362,11 @@ class DuplicateDetector:
             m = self._RE_IDENT.match(code, i)
             if m:
                 ident = m.group(0)
-                if ident in self._KEYWORDS:
+                if ident in ('for', 'while', 'do'):
+                    # Loop-construct normalisation: `for` and `while` clones
+                    # with identical bodies now hash the same.
+                    tokens.append('LOOP')
+                elif ident in self._KEYWORDS:
                     tokens.append(ident)
                 elif ident in ('S', 'N', 'C', 'ID'):
                     tokens.append(ident)  # already-normalised marker
@@ -1309,6 +1377,31 @@ class DuplicateDetector:
             tokens.append(ch)
             i += 1
         return tokens
+
+    def _statement_multiset(self, tokens: List[str]) -> Dict[str, int]:
+        """Split a token stream into `;`/`{`/`}`-terminated statements and
+        return their multiset. Order-insensitive: two methods containing the
+        same statements in different order produce identical multisets."""
+        stmts: Dict[str, int] = defaultdict(int)
+        buf: List[str] = []
+        for t in tokens:
+            buf.append(t)
+            if t in (';', '{', '}'):
+                s = ' '.join(buf).strip()
+                if len(buf) > 1:
+                    stmts[s] += 1
+                buf = []
+        if buf:
+            stmts[' '.join(buf)] += 1
+        return dict(stmts)
+
+    @staticmethod
+    def _multiset_similarity(a: Dict[str, int], b: Dict[str, int]) -> float:
+        if not a or not b:
+            return 0.0
+        inter = sum(min(a.get(k, 0), b.get(k, 0)) for k in set(a) | set(b))
+        union = sum(max(a.get(k, 0), b.get(k, 0)) for k in set(a) | set(b))
+        return inter / union if union else 0.0
 
 
 class MethodExtractor:
@@ -1646,17 +1739,47 @@ class ClassSplitter:
         }
 
     def generate_split_classes(
-        self, class_info: ClassInfo, splits: List[Dict]
+        self, class_info: ClassInfo, splits: List[Dict],
+        source_code: str = '',
     ) -> Dict[str, str]:
-        """Disabled — used to emit stubs with `// TODO: Move method X here`.
+        """Generate PREVIEW code for suggested split classes.
 
-        Returning real, compilable split classes requires moving method
-        bodies (with their captures and field accesses) across class
-        boundaries — that's behavior-changing surgery a regex layer cannot
-        do safely. Class-split is now suggestion-only: `analyze_class()`
-        still reports cohesion clusters so the user can do the move by hand.
+        Real field declarations (correct types) and real method bodies are
+        extracted from the source by the parser's brace-matched line ranges —
+        no `// TODO` stubs. The preview is advisory output only: the engine
+        NEVER applies it to the user's file (moving bodies across class
+        boundaries safely needs semantic analysis), but the user gets
+        compilable scaffolding to apply by hand.
         """
-        return {}
+        result: Dict[str, str] = {}
+        src_lines = source_code.split('\n') if source_code else []
+
+        method_src: Dict[str, str] = {}
+        for m in class_info.methods:
+            if src_lines and m.start_line > 0 and m.end_line >= m.start_line:
+                snippet = '\n'.join(src_lines[m.start_line - 1:m.end_line])
+                method_src[m.name] = snippet
+
+        for split in splits:
+            out = [f'// PREVIEW — suggested extraction from {class_info.name}',
+                   f'public class {split["name"]} {{', '']
+            for f_name in split.get('fields', []):
+                for fld in class_info.fields:
+                    if fld.name == f_name:
+                        mods = ' '.join(mod for mod in fld.modifiers) or 'private'
+                        out.append(f'    {mods} {fld.type_name} {fld.name};')
+            out.append('')
+            for m_name in split.get('methods', []):
+                body = method_src.get(m_name)
+                if body:
+                    out.append(body if body.startswith('    ') else
+                               '\n'.join('    ' + l for l in body.split('\n')))
+                    out.append('')
+                else:
+                    out.append(f'    // {m_name}: source range unavailable — copy manually')
+            out.append('}')
+            result[split['name']] = '\n'.join(out)
+        return result
 
     def _cluster_by_field_access(self, class_info: ClassInfo) -> List[Dict]:
         """Cluster methods by which fields they reference."""
@@ -2515,20 +2638,38 @@ class StructureChanger:
         # visibility) that a regex layer cannot provide. We therefore emit
         # the split plan (class names, method groupings, rationale) without
         # touching the source. refactored_code == original_code, always.
+        # Preview code uses REAL method bodies pulled via the parser's
+        # brace-matched line ranges (see generate_split_classes) — compilable
+        # scaffolding for manual application, never auto-applied.
+        parsed_classes = self._get_extracted_classes(code)
+        class_infos = {c['name']: self._dict_to_class_info(c) for c in parsed_classes}
+
         if analysis.get('suggested_classes'):
             for suggestion in analysis['suggested_classes']:
                 new_class = self._generate_new_class(suggestion, code)
-                new_class.code = ''  # plan only — no stub code emitted
+                ci = class_infos.get(new_class.original_class)
+                if ci:
+                    preview = self.class_splitter.generate_split_classes(
+                        ci,
+                        [{'name': new_class.name,
+                          'methods': new_class.methods,
+                          'fields': new_class.fields}],
+                        source_code=code,
+                    )
+                    new_class.code = preview.get(new_class.name, '')
                 new_classes.append(new_class)
         else:
             for cls_analysis in analysis.get('classes', []):
                 if not cls_analysis.get('needs_split'):
                     continue
-                for cls in self._get_extracted_classes(code):
-                    class_info = self._dict_to_class_info(cls)
+                for cls in parsed_classes:
+                    class_info = class_infos[cls['name']]
                     split_result = self.class_splitter.analyze_class(class_info)
                     if not split_result['needs_split']:
                         continue
+                    previews = self.class_splitter.generate_split_classes(
+                        class_info, split_result['suggested_splits'], source_code=code,
+                    )
                     for split in split_result['suggested_splits']:
                         new_classes.append(NewClassDefinition(
                             name=split['name'],
@@ -2536,7 +2677,7 @@ class StructureChanger:
                             fields=split.get('fields', []),
                             methods=split.get('methods', []),
                             original_class=cls['name'],
-                            code='',
+                            code=previews.get(split['name'], ''),
                         ))
 
         explanations = self._generate_explanations(analysis, new_classes)

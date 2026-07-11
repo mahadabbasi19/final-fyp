@@ -1122,7 +1122,8 @@
     const seq = ++state.errorCheckSeq;
     state.errorCheckInflight = true;
     try {
-      const result = await api.backendCheckErrors({ java_code: code });
+      // project_root enables cross-file symbol resolution (javac -sourcepath).
+      const result = await api.backendCheckErrors({ java_code: code, project_root: state.workspacePath || null });
       // Drop stale responses if user kept typing.
       if (seq !== state.errorCheckSeq) return;
       if (result.detail) return;
