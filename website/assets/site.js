@@ -78,16 +78,15 @@
       mac: 'After downloading, drag CodeNova to Applications, then right-click → Open → Open on first launch (required once for apps outside the App Store).'
     };
     Array.prototype.forEach.call(document.querySelectorAll('.btn[data-download]'), function (btn) {
+      // Skip header buttons (too cramped) and centered CTA buttons marked
+      // data-no-note (a paragraph under them breaks the layout).
+      if (btn.closest('.site-header') || btn.hasAttribute('data-no-note')) return;
       var os = btn.getAttribute('data-download');
       if (os === 'auto') os = detectOS();
       var note = document.createElement('p');
       note.className = 'dl-note';
       note.textContent = NOTES[os] || NOTES.windows;
-      // Header buttons are too cramped for a note — only annotate buttons
-      // that sit inside page content.
-      if (!btn.closest('.site-header')) {
-        btn.insertAdjacentElement('afterend', note);
-      }
+      btn.insertAdjacentElement('afterend', note);
     });
 
     // Mobile nav toggle
