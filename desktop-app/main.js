@@ -1001,6 +1001,16 @@ app.whenReady().then(async () => {
   buildAppMenu();
   createWindow();
 
+  // Notify the renderer about JDK availability once the UI is loaded —
+  // drives the "JDK not found" startup toast (this IDE is Java-focused,
+  // so the check always runs).
+  mainWindow?.webContents.once('did-finish-load', () => {
+    mainWindow?.webContents.send('java:status', {
+      found: !!JAVA_HOME,
+      home: JAVA_HOME || null,
+    });
+  });
+
   // Start backend in background
   const backendStarted = await startBackend();
   if (backendStarted) {

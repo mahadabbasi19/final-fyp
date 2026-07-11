@@ -84,6 +84,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('backend:status', handler);
     return () => ipcRenderer.removeListener('backend:status', handler);
   },
+  onJavaStatus: (callback) => {
+    const handler = (event, payload) => callback(payload);
+    ipcRenderer.on('java:status', handler);
+    return () => ipcRenderer.removeListener('java:status', handler);
+  },
 
   // --- Push to GitHub (standalone subprocess) ---
   pushToGitHub: (opts) => ipcRenderer.invoke('push-to-github', opts),
