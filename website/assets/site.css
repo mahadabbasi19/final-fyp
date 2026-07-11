@@ -236,3 +236,61 @@ h1, h2, h3 { letter-spacing: -0.03em; line-height: 1.1; margin: 0; }
 /* Utility */
 .grid { display: grid; }
 .flex { display: flex; }
+
+/* ============================================================
+   RESPONSIVE — universal mobile hardening (iOS / Android)
+   ============================================================ */
+
+/* Prevent OS text inflation on orientation change */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+
+/* Media never overflows its container */
+img, svg, video, canvas { max-width: 100%; height: auto; }
+
+/* Flex/grid children may shrink below their content size (kills overflow) */
+.hero-split > *, .footer-grid > *, .grid > *, .nav > * { min-width: 0; }
+pre, table { max-width: 100%; }
+
+/* Bigger, comfortable tap target for the hamburger (>=44px) */
+.nav-toggle { padding: 10px; margin-right: -6px; border-radius: 10px; min-width: 44px; min-height: 44px; align-items: center; justify-content: center; }
+.nav-toggle:hover { background: rgba(180, 151, 207, 0.08); }
+
+/* ---- Tablet ---- */
+@media (max-width: 860px) {
+  .section-sub { font-size: 16px; }
+}
+
+/* ---- Large phone / small tablet ---- */
+@media (max-width: 640px) {
+  .container { padding: 0 18px; }
+  .site-footer { padding: 44px 0 28px; }
+  .footer-grid { gap: 28px 32px; }
+  .footer-col { min-width: 130px; }
+  .btn-lg { padding: 14px 24px; font-size: 15px; }
+  .footer-bottom { justify-content: flex-start; }
+}
+
+/* Inputs must be >=16px so iOS doesn't zoom the page on focus */
+@media (max-width: 768px) {
+  input, textarea, select { font-size: 16px; }
+}
+
+/* ---- Phones ---- */
+@media (max-width: 480px) {
+  .nav { height: 60px; }
+  .nav-logo { font-size: 16px; }
+  .nav-logo img { width: 30px; height: 30px; }
+  /* Collapse the header download to an icon to guarantee it fits */
+  .nav-actions .btn-primary { padding: 11px 13px; gap: 0; }
+  .nav-actions .btn-primary [data-download-label] { display: none; }
+  .nav.open .nav-menu { top: 60px; }
+  .section-title { font-size: clamp(24px, 7vw, 32px); }
+  .eyebrow { font-size: 12px; padding: 5px 12px; }
+}
+
+/* Requirements spec tables: wrap instead of scrolling off-screen */
+@media (max-width: 560px) {
+  .req-table { font-size: 13px; }
+  .req-table th, .req-table td { padding: 9px 8px; white-space: normal; word-break: break-word; }
+  .req-table td:first-child { width: 62px; }
+}

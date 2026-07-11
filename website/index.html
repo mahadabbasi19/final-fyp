@@ -463,7 +463,8 @@
       .hero-copy p:last-child { justify-content: center; }
       .features-grid { grid-template-columns: 1fr; }
     }
-    @media (max-width: 720px) { .float-bar { display: none !important; } }
+    /* Hide the decorative bars once the hero stacks to one column */
+    @media (max-width: 900px) { .float-bar { display: none !important; } }
     @media (prefers-reduced-motion: reduce) { .float-bar { animation: none; } }
   </style>
 
