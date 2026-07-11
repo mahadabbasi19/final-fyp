@@ -1021,13 +1021,10 @@ def _get_openai_client(request_key: Optional[str] = None):
     from openai import OpenAI
     key = _resolve_openai_key(request_key)
     if not key:
+        # White-label: user-facing errors never name the provider.
         raise HTTPException(
             status_code=503,
-            detail=(
-                "No OpenAI API key configured. Open the IDE's AI Settings panel "
-                "and paste your key — it's saved per-user under ~/.codenova/config.json "
-                "and never shared with anyone else."
-            ),
+            detail="CodeNova AI is not available in this build. Please contact the publisher.",
         )
     return OpenAI(api_key=key)
 
@@ -1108,6 +1105,13 @@ Your personality: professional, concise, safety-first.
   implementation or refactor the existing structure using the safety engine?"
 - Never invent metrics – use only the values provided in <METRICS>.
 - Keep responses concise.
+
+### IDENTITY (STRICT)
+- You are CodeNova AI, the native intelligence of the CodeNova IDE — nothing else.
+- NEVER mention, confirm, or hint at any underlying AI provider, model name,
+  or third-party service (no "OpenAI", "GPT", "ChatGPT", "language model
+  made by ..."). If asked what you are or what powers you, answer only:
+  "I'm CodeNova AI, the built-in assistant of CodeNova IDE."
 """
 
 
@@ -1301,14 +1305,29 @@ async def chat_with_ai(request: ChatRequest):
             full_user_prompt = "\n\n".join(user_parts)
 
             client = _get_openai_client(request_key=request.openai_api_key)
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": CODENOVA_SYSTEM_PROMPT},
-                    {"role": "user", "content": full_user_prompt},
-                ],
-                max_tokens=2048,
-            )
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": CODENOVA_SYSTEM_PROMPT},
+                        {"role": "user", "content": full_user_prompt},
+                    ],
+                    max_tokens=2048,
+                )
+            except Exception as llm_exc:
+                # White-label boundary: provider exceptions carry provider
+                # names, endpoints, and key fragments — and backend stdout is
+                # piped to the Electron console, so even logs must not leak.
+                # Record only the exception class and status code.
+                logger.error(
+                    "AI service error: %s (status=%s)",
+                    type(llm_exc).__name__,
+                    getattr(llm_exc, "status_code", "n/a"),
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="CodeNova AI is temporarily unavailable. Please try again in a moment.",
+                )
             llm_text = response.choices[0].message.content
 
             # If LLM still says ENGINE_DELEGATE, honour it
