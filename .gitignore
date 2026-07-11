@@ -41,5 +41,6 @@ java_refactoring_engine/.venv/
 # Collab relay runtime data
 collab-server/y-leveldb/
 
-# Built installers at repo root (exceed GitHub 100MB limit)
+# Built installers (exceed GitHub 100MB limit — distribute via GitHub Releases)
 *.dmg
+*.exe

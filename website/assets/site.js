@@ -8,16 +8,18 @@
   'use strict';
 
   // ----- Download config (update these paths when installers change) -----
+  // Installers are hosted as GitHub Release assets (files exceed GitHub's
+  // 100MB repo limit). Update the tag below when publishing a new version.
+  var RELEASE = 'https://github.com/mahadabbasi19/final-fyp/releases/download/v2.0.0/';
   var DOWNLOADS = {
     windows: {
       label: 'Download for Windows',
-      // Placeholder Windows installer — drop the .exe here when built.
-      url: 'downloads/CodeNova-IDE-2.0.0-Windows.exe',
+      url: RELEASE + 'CodeNova-IDE-Setup-2.0.0.exe',
       os: 'Windows'
     },
     mac: {
       label: 'Download for macOS',
-      url: 'downloads/CodeNova-IDE-2.0.0-macOS.dmg',
+      url: RELEASE + 'CodeNova-IDE-2.0.0-macOS.dmg',
       os: 'macOS'
     }
   };
