@@ -271,6 +271,7 @@
     document.getElementById('monaco-container').style.display = 'block';
 
     state.editor.setModel(tab.model);
+    tab.model.updateOptions({ tabSize: getUserSettings().tabSize });
     const lang = tab.model.getLanguageId();
     document.getElementById('status-language').textContent = lang.charAt(0).toUpperCase() + lang.slice(1);
 
@@ -3643,12 +3644,8 @@
         if (n && n.trim()) { localStorage.setItem('collab.username', n.trim()); showNotification('Name saved.', 'info'); }
       }},
       '---',
-      { icon: 'settings-gear', label: 'Settings', action: () => {
-        showNotification('Editor settings: use the View / Terminal menus. More options coming.', 'info');
-      }},
-      { icon: 'keyboard', label: 'Keyboard Shortcuts', action: () => {
-        showNotification('Ctrl+N New · Ctrl+O Open · Ctrl+S Save · Ctrl+` Terminal · F5 Run · Ctrl+Shift+I AI Chat', 'info');
-      }},
+      { icon: 'settings-gear', label: 'Settings', action: showSettingsPage },
+      { icon: 'keyboard', label: 'Keyboard Shortcuts', action: showKeybindingsPage },
       { icon: 'trash', label: 'Clear Saved Data (tokens, repo URLs)', action: () => {
         Object.keys(localStorage).filter(k => k.startsWith('github_repo_url::') || k === 'github.oauthToken' || k === 'github.oauthLogin').forEach(k => localStorage.removeItem(k));
         showNotification('Saved GitHub data cleared.', 'info');
@@ -3666,10 +3663,138 @@
   });
 
   // =========================================================================
+  // Settings & Keyboard Shortcuts pages (VS Code-style full overlays)
+  // =========================================================================
+
+  const SETTINGS_DEFAULTS = { fontSize: 14, tabSize: 4, wordWrap: false, minimap: true, autoSave: false };
+
+  function getUserSettings() {
+    try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem('user.settings') || '{}') }; }
+    catch { return { ...SETTINGS_DEFAULTS }; }
+  }
+
+  function saveUserSettings(s) {
+    localStorage.setItem('user.settings', JSON.stringify(s));
+    applyUserSettings();
+  }
+
+  function applyUserSettings() {
+    const s = getUserSettings();
+    if (state.editor) {
+      state.editor.updateOptions({
+        fontSize: s.fontSize,
+        wordWrap: s.wordWrap ? 'on' : 'off',
+        minimap: { enabled: s.minimap },
+      });
+    }
+    state.openTabs.forEach(t => t.model && t.model.updateOptions({ tabSize: s.tabSize }));
+    state.autoSave = s.autoSave;
+  }
+
+  function closeFullPage() { document.getElementById('full-page-overlay')?.remove(); }
+
+  function openFullPage(title, bodyBuilder) {
+    closeFullPage();
+    const page = document.createElement('div');
+    page.id = 'full-page-overlay';
+    page.style.cssText = 'position:absolute;inset:0;z-index:900;background:#1e1e1e;display:flex;flex-direction:column;overflow:hidden';
+    page.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 26px;border-bottom:1px solid #333">
+        <span style="font-size:20px;font-weight:600;color:#e7e7e7">${escapeHtml(title)}</span>
+        <button id="full-page-close" style="background:none;border:none;color:#bbb;cursor:pointer;font-size:16px"><i class="codicon codicon-close"></i></button>
+      </div>
+      <div id="full-page-body" style="flex:1;overflow-y:auto;padding:18px 26px"></div>`;
+    // Mount inside the editor area so the sidebar/activity bar stay usable.
+    const host = document.getElementById('monaco-container')?.parentElement || document.body;
+    host.style.position = 'relative';
+    host.appendChild(page);
+    page.querySelector('#full-page-close').onclick = closeFullPage;
+    const esc = (ev) => { if (ev.key === 'Escape') { closeFullPage(); document.removeEventListener('keydown', esc); } };
+    document.addEventListener('keydown', esc);
+    bodyBuilder(page.querySelector('#full-page-body'));
+  }
+
+  function showSettingsPage() {
+    openFullPage('Settings', (body) => {
+      const s = getUserSettings();
+      const row = (label, desc, controlHtml) => `
+        <div class="settings-row" data-label="${escapeHtml(label.toLowerCase())}" style="padding:14px 0;border-bottom:1px solid #2a2a2a;max-width:720px">
+          <div style="font-size:13px;font-weight:600;color:#e7e7e7">${escapeHtml(label)}</div>
+          <div style="font-size:12px;color:#9a9a9a;margin:3px 0 8px">${escapeHtml(desc)}</div>
+          ${controlHtml}
+        </div>`;
+      const num = (id, val, min, max) =>
+        `<input type="number" id="${id}" value="${val}" min="${min}" max="${max}" style="width:80px;background:#3c3c3c;color:#fff;border:1px solid #555;padding:4px 8px;border-radius:2px">`;
+      const chk = (id, val) =>
+        `<input type="checkbox" id="${id}" ${val ? 'checked' : ''} style="transform:scale(1.2)">`;
+
+      body.innerHTML = `
+        <input id="settings-search" placeholder="Search settings" style="width:100%;max-width:720px;padding:8px 12px;background:#3c3c3c;color:#fff;border:1px solid #555;border-radius:2px;margin-bottom:6px">
+        <div style="font-size:11px;letter-spacing:1px;color:#888;margin:18px 0 4px">TEXT EDITOR</div>
+        ${row('Font Size', 'Controls the editor font size in pixels.', num('set-fontsize', s.fontSize, 8, 40))}
+        ${row('Tab Size', 'The number of spaces a tab is equal to.', num('set-tabsize', s.tabSize, 1, 8))}
+        ${row('Word Wrap', 'Wrap long lines instead of horizontal scrolling.', chk('set-wordwrap', s.wordWrap))}
+        ${row('Minimap', 'Show the code minimap on the right side of the editor.', chk('set-minimap', s.minimap))}
+        <div style="font-size:11px;letter-spacing:1px;color:#888;margin:18px 0 4px">FILES</div>
+        ${row('Auto Save', 'Automatically save files one second after you stop typing.', chk('set-autosave', s.autoSave))}
+        <div style="font-size:11px;letter-spacing:1px;color:#888;margin:18px 0 4px">COLLABORATION</div>
+        ${row('Display Name', 'Shown to teammates on your cursor in live sessions.',
+          `<input id="set-displayname" value="${escapeHtml(getUsername())}" style="width:240px;background:#3c3c3c;color:#fff;border:1px solid #555;padding:4px 8px;border-radius:2px">`)}
+      `;
+
+      const commit = () => {
+        const next = {
+          fontSize: parseInt(body.querySelector('#set-fontsize').value) || 14,
+          tabSize: parseInt(body.querySelector('#set-tabsize').value) || 4,
+          wordWrap: body.querySelector('#set-wordwrap').checked,
+          minimap: body.querySelector('#set-minimap').checked,
+          autoSave: body.querySelector('#set-autosave').checked,
+        };
+        saveUserSettings(next);
+        const dn = body.querySelector('#set-displayname').value.trim();
+        if (dn) localStorage.setItem('collab.username', dn);
+      };
+      body.querySelectorAll('input').forEach(el => el.addEventListener('change', commit));
+
+      body.querySelector('#settings-search').addEventListener('input', (ev) => {
+        const q = ev.target.value.toLowerCase();
+        body.querySelectorAll('.settings-row').forEach(r => {
+          r.style.display = r.dataset.label.includes(q) ? '' : 'none';
+        });
+      });
+    });
+  }
+
+  function showKeybindingsPage() {
+    openFullPage('Keyboard Shortcuts', (body) => {
+      const isMac = navigator.platform.toUpperCase().includes('MAC');
+      const mod = isMac ? '⌘' : 'Ctrl';
+      const rows = [
+        ['New File', `${mod}+N`], ['Open File', `${mod}+O`], ['Open Folder', `${mod}+K ${mod}+O`],
+        ['Save', `${mod}+S`], ['Save As', `${mod}+Shift+S`],
+        ['Find', `${mod}+F`], ['Replace', `${mod}+H`],
+        ['Toggle Explorer', `${mod}+Shift+E`], ['Search in Files', `${mod}+Shift+F`],
+        ['Toggle Terminal', `${mod}+\``], ['New Terminal', `${mod}+Shift+\``],
+        ['Run File', 'F5'], ['Stop Run', 'Shift+F5'],
+        ['AI Chat', `${mod}+Shift+I`], ['Refactoring Panel', `${mod}+Shift+R`],
+        ['Zoom In / Out', `${mod}+= / ${mod}+-`],
+        ...(isMac ? [['Quit', '⌘+Q'], ['Hide Window', '⌘+H'], ['Minimize', '⌘+M']] : []),
+      ];
+      body.innerHTML = `
+        <table style="width:100%;max-width:640px;border-collapse:collapse;font-size:13px">
+          <tr style="color:#888;text-align:left"><th style="padding:8px;border-bottom:1px solid #333">Command</th><th style="padding:8px;border-bottom:1px solid #333">Keybinding</th></tr>
+          ${rows.map(([c, k]) => `<tr><td style="padding:8px;border-bottom:1px solid #2a2a2a;color:#ddd">${escapeHtml(c)}</td><td style="padding:8px;border-bottom:1px solid #2a2a2a"><code style="background:#333;padding:2px 8px;border-radius:3px;color:#9cdcfe">${escapeHtml(k)}</code></td></tr>`).join('')}
+        </table>`;
+    });
+  }
+
+  // =========================================================================
   // Initialize
   // =========================================================================
   async function init() {
     await initMonaco();
+    // Apply persisted user settings (font size, wrap, minimap, auto save).
+    applyUserSettings();
     // Delay terminal init to let layout settle
     setTimeout(() => initTerminal(), 300);
     // Check backend health after a short delay for startup

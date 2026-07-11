@@ -126,6 +126,7 @@ class GitManager:
         try:
             self._repo = Repo(repo_path, search_parent_directories=True)
             self._repo_path = self._repo.working_dir
+            self._make_non_interactive()
             return self._repo_summary()
         except (InvalidGitRepositoryError, NoSuchPathError) as exc:
             self._repo = None
@@ -137,7 +138,21 @@ class GitManager:
         os.makedirs(path, exist_ok=True)
         self._repo = Repo.init(path)
         self._repo_path = self._repo.working_dir
+        self._make_non_interactive()
         return self._repo_summary()
+
+    def _make_non_interactive(self) -> None:
+        """Network git ops behind the API have no TTY — a credential prompt
+        would hang forever. Disable prompting so pull/push fail fast with a
+        clear error instead. Stored credential helpers (macOS keychain,
+        Windows Credential Manager) continue to work normally."""
+        try:
+            self._repo.git.update_environment(
+                GIT_TERMINAL_PROMPT="0",
+                GCM_INTERACTIVE="Never",
+            )
+        except Exception:
+            pass
 
     @property
     def is_open(self) -> bool:
@@ -427,7 +442,21 @@ class GitManager:
                 })
             return {"remote": remote_name, "branch": branch, "push_info": results, "status": "ok"}
         except GitCommandError as exc:
-            raise GitManagerError(f"Push failed: {exc}") from exc
+            raise GitManagerError(self._friendly_net_error("Push", exc)) from exc
+
+    @staticmethod
+    def _friendly_net_error(op: str, exc: Exception) -> str:
+        text = str(exc).lower()
+        if "could not read username" in text or "authentication failed" in text or "terminal prompts disabled" in text:
+            return (f"{op} failed: this repository requires sign-in. "
+                    "Use the cloud-upload button in the toolbar (it accepts your "
+                    "GitHub Personal Access Token), or configure git credentials once "
+                    "in a terminal.")
+        if "could not resolve host" in text:
+            return f"{op} failed: no internet connection or the remote host is unreachable."
+        if "non-fast-forward" in text or "fetch first" in text:
+            return f"{op} failed: the remote has newer commits — Pull first, then retry."
+        return f"{op} failed: {exc}"
 
     def pull_from_remote(self, remote_name: str = "origin") -> Dict[str, Any]:
         """Pull (fetch + merge) from a remote."""
@@ -453,7 +482,7 @@ class GitManager:
                 "status": "conflict" if conflicts else "ok",
             }
         except GitCommandError as exc:
-            raise GitManagerError(f"Pull failed: {exc}") from exc
+            raise GitManagerError(self._friendly_net_error("Pull", exc)) from exc
 
     def fetch_remote(self, remote_name: str = "origin") -> Dict[str, Any]:
         """Fetch updates from a remote without merging."""
