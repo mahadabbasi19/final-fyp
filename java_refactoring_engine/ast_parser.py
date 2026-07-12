@@ -384,6 +384,25 @@ class JavaASTParser:
         # No matching close found — declaration is incomplete; fall back to start.
         return start_line
     
+    def _get_type_string(self, type_node) -> str:
+        if not type_node:
+            return 'Object'
+        
+        type_str = str(type_node.name)
+        if hasattr(type_node, 'arguments') and type_node.arguments:
+            args = []
+            for arg in type_node.arguments:
+                if hasattr(arg, 'type') and arg.type:
+                    args.append(self._get_type_string(arg.type))
+                else:
+                    args.append('Object')
+            type_str += f"<{', '.join(args)}>"
+            
+        if hasattr(type_node, 'dimensions') and type_node.dimensions:
+            type_str += '[]' * len(type_node.dimensions)
+            
+        return type_str
+
     def _extract_method_info(self, method) -> MethodInfo:
         """
         Extract detailed information about a method.
@@ -401,11 +420,11 @@ class JavaASTParser:
         for param in method.parameters:
             param_info = {
                 'name': param.name,
-                'type': str(param.type.name) if param.type else 'Object'
+                'type': self._get_type_string(param.type)
             }
             params.append(param_info)
 
-        return_type = str(method.return_type.name) if method.return_type else "void"
+        return_type = self._get_type_string(method.return_type) if method.return_type else "void"
         modifiers = list(method.modifiers) if method.modifiers else []
 
         start_line, end_line, body_lines = self._estimate_method_lines(method)

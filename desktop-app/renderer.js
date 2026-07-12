@@ -2127,21 +2127,33 @@
     const cat = dashboard.category || 'UNKNOWN';
     const fmt = (v, d) => (typeof v === 'number' ? v.toFixed(d) : '-');
 
+    // The backend nests these: complexity={average,max}, halstead={volume,...},
+    // coupling/cohesion={...}. Reading dashboard.complexity directly printed
+    // "[object Object]". Pull the scalar out of each nested object.
+    const num = (v) => (typeof v === 'number' ? v : (v && typeof v === 'object' ? undefined : v));
     const healthScore = fmt(dashboard.health_score, 1);
     const mi = fmt(dashboard.maintainability_index, 1);
+    const cplxAvg = dashboard.complexity && typeof dashboard.complexity === 'object'
+      ? dashboard.complexity.average : dashboard.complexity;
+    const halVol = dashboard.halstead && typeof dashboard.halstead === 'object'
+      ? dashboard.halstead.volume : dashboard.halstead_volume;
+    const coupVal = dashboard.coupling && typeof dashboard.coupling === 'object'
+      ? (dashboard.coupling.score ?? dashboard.coupling.value) : dashboard.coupling;
+    const cohVal = dashboard.cohesion && typeof dashboard.cohesion === 'object'
+      ? (dashboard.cohesion.score ?? dashboard.cohesion.value) : dashboard.cohesion;
 
     let metricsHtml = '';
     metricsHtml += `<div class="chat-health-metric"><span>Health Score</span><span class="metric-val">${healthScore}</span></div>`;
     metricsHtml += `<div class="chat-health-metric"><span>Maintainability</span><span class="metric-val">${mi}</span></div>`;
 
-    if (typeof dashboard.halstead_volume === 'number')
-      metricsHtml += `<div class="chat-health-metric"><span>Halstead Vol.</span><span class="metric-val">${fmt(dashboard.halstead_volume, 0)}</span></div>`;
-    if (dashboard.complexity != null)
-      metricsHtml += `<div class="chat-health-metric"><span>Complexity</span><span class="metric-val">${dashboard.complexity}</span></div>`;
-    if (typeof dashboard.coupling === 'number')
-      metricsHtml += `<div class="chat-health-metric"><span>Coupling</span><span class="metric-val">${fmt(dashboard.coupling, 2)}</span></div>`;
-    if (typeof dashboard.cohesion === 'number')
-      metricsHtml += `<div class="chat-health-metric"><span>Cohesion</span><span class="metric-val">${fmt(dashboard.cohesion, 2)}</span></div>`;
+    if (typeof cplxAvg === 'number')
+      metricsHtml += `<div class="chat-health-metric"><span>Avg Complexity</span><span class="metric-val">${fmt(cplxAvg, 1)}</span></div>`;
+    if (typeof halVol === 'number')
+      metricsHtml += `<div class="chat-health-metric"><span>Halstead Vol.</span><span class="metric-val">${fmt(halVol, 0)}</span></div>`;
+    if (typeof coupVal === 'number')
+      metricsHtml += `<div class="chat-health-metric"><span>Coupling</span><span class="metric-val">${fmt(coupVal, 2)}</span></div>`;
+    if (typeof cohVal === 'number')
+      metricsHtml += `<div class="chat-health-metric"><span>Cohesion</span><span class="metric-val">${fmt(cohVal, 2)}</span></div>`;
 
     return `
       <div class="chat-health-card">

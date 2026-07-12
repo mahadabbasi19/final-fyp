@@ -555,12 +555,26 @@ async def refactor_review(request: ReviewSessionRequest):
         if not request.java_code or len(request.java_code.strip()) == 0:
             raise HTTPException(status_code=400, detail="Java code cannot be empty")
 
-        engine = JavaRefactoringEngine()
-        result = engine.refactor(
-            code=request.java_code,
-            apply_all=True,
-            selected_refactorings=request.selected_refactorings,
-        )
+        # Determine refactoring selection
+        selected = request.selected_refactorings
+        if selected and len(selected) > 0:
+            # Always ensure deterministic, safe refactorings are active even if omitted from UI
+            # or just use exactly what the user selected. To be safe, we'll use exactly what they selected
+            # but usually dead code, unused imports, condition simplification are good defaults.
+            # But let's trust the user selection.
+            engine = JavaRefactoringEngine()
+            result = engine.refactor(
+                code=request.java_code,
+                apply_all=False,
+                selected_refactorings=selected,
+            )
+        else:
+            engine = JavaRefactoringEngine()
+            result = engine.refactor(
+                code=request.java_code,
+                apply_all=True,
+                selected_refactorings=None,
+            )
 
         session_id = str(uuid4())
         diff = generate_diff(result.original_code, result.refactored_code)

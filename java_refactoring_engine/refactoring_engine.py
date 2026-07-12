@@ -97,6 +97,7 @@ class ScopeAnalysisResult:
     return_type: Optional[str] = None      # resolved Java type for single_return
     feasible: bool = True
     reason: str = ""
+    declared_before: Set[str] = field(default_factory=set) # variables declared before slice
 
 
 @dataclass
@@ -361,8 +362,13 @@ class BehaviorPreservationProtocol:
                     for fn in os.listdir(tmp):
                         if not fn.endswith('.class'):
                             continue
+                        # No '-p': compare only the PUBLIC/PROTECTED surface —
+                        # the real behavioral contract. Private members are
+                        # implementation detail, and removing unused private
+                        # fields/methods is precisely what dead-code
+                        # elimination does (it must not be flagged as drift).
                         jp = subprocess.run(
-                            [javap, '-p', os.path.join(tmp, fn)],
+                            [javap, os.path.join(tmp, fn)],
                             capture_output=True, text=True, timeout=10,
                         )
                         for line in (jp.stdout or '').splitlines():
@@ -462,6 +468,10 @@ class VariableScopeAnalyzer:
         used_in_slice = self._extract_used_vars(slice_lines)
         modified_in_slice = self._extract_modified_vars(slice_lines)
         used_after = self._extract_used_vars(after_lines)
+        declared_after = self._extract_declared_vars(after_lines)
+        
+        # Remove variables that are shadowed/redeclared later
+        used_after = {v for v in used_after if v not in declared_after}
 
         # Add method parameters as declared-before
         if method_info:
@@ -502,15 +512,16 @@ class VariableScopeAnalyzer:
             return_type=return_type,
             feasible=(resolution != "data_class"),
             reason="" if resolution != "data_class" else "Multiple out-params require wrapper class",
+            declared_before=set(declared_before.keys()),
         )
 
     # --- helpers (AST-first with regex fallback) ---
 
     _DECL_PATTERN = re.compile(
-        r'\b((?:final\s+)?[A-Z]\w*(?:<[^>]+>)?(?:\[\])*)\s+([a-z_]\w*)\s*[=;,)]'
+        r'\b((?:final\s+)?(?:[A-Z]\w*(?:<[^>]+>)?(?:\[\])*|int|long|short|byte|float|double|char|boolean(?:\[\])*))\s+([a-z_]\w*)\s*[=;,)]'
     )
     _ASSIGN_PATTERN = re.compile(r'\b([a-z_]\w*)\s*(?:\+|-|\*|/|%|&|\||\^)?=')
-    _IDENT_PATTERN = re.compile(r'\b([a-z_]\w*)\b')
+    _IDENT_PATTERN = re.compile(r'\b([a-z_]\w*)\b(?!\s*\()')
 
     _JAVA_KEYWORDS = {
         'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'break',
@@ -540,8 +551,10 @@ class VariableScopeAnalyzer:
         used: Set[str] = set()
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
+            if stripped.startswith('/*') or stripped.startswith('*'):
                 continue
+            if '//' in stripped:
+                stripped = stripped.split('//')[0].strip()
             for m in self._IDENT_PATTERN.finditer(stripped):
                 name = m.group(1)
                 if name not in self._JAVA_KEYWORDS:
@@ -552,8 +565,10 @@ class VariableScopeAnalyzer:
         modified: Set[str] = set()
         for line in lines:
             stripped = line.strip()
-            if stripped.startswith('//') or stripped.startswith('/*') or stripped.startswith('*'):
+            if stripped.startswith('/*') or stripped.startswith('*'):
                 continue
+            if '//' in stripped:
+                stripped = stripped.split('//')[0].strip()
             for m in self._ASSIGN_PATTERN.finditer(stripped):
                 name = m.group(1)
                 if name not in self._JAVA_KEYWORDS:
@@ -785,19 +800,29 @@ class ConditionSimplifier:
                             'recommendation': "Apply De Morgan's Law to simplify negated compound condition",
                         })
 
-            # Detect deeply nested if-else that can use early return (guard clause)
+            # Detect deeply nested if-else that can use early return (guard clause) or flattening
             if stripped.startswith('if') and not stripped.startswith('if ('):
                 pass  # only match well-formed ifs
             if re.match(r'^if\s*\(', stripped):
                 # Check nesting depth at this line
                 depth = self._nesting_depth_at(lines, i)
                 if depth >= 3:
-                    opportunities.append({
-                        'type': 'guard_clause',
-                        'line': i + 1,
-                        'original': stripped,
-                        'recommendation': 'Introduce guard clause to reduce nesting depth',
-                    })
+                    indent = line[:len(line) - len(line.lstrip())]
+                    
+                    if self._try_guard_clause(lines, i, indent):
+                        opportunities.append({
+                            'type': 'guard_clause',
+                            'line': i + 1,
+                            'original': stripped,
+                            'recommendation': 'Introduce guard clause to reduce nesting depth',
+                        })
+                    elif self._try_flatten_nested_if(lines, i, indent):
+                        opportunities.append({
+                            'type': 'flatten_if',
+                            'line': i + 1,
+                            'original': stripped,
+                            'recommendation': 'Flatten nested if statements',
+                        })
 
         return opportunities
 
@@ -867,6 +892,25 @@ class ConditionSimplifier:
                         ))
                         result_lines.extend(guard_result['new_lines'])
                         i += guard_result['consumed']
+                        continue
+
+                    flatten_result = self._try_flatten_nested_if(lines, i, indent)
+                    if flatten_result:
+                        original_snippet = '\n'.join(
+                            lines[i:i + flatten_result['consumed']]
+                        )
+                        actions.append(RefactoringAction(
+                            action_type='reduce_nesting',
+                            description=f"Flattened nested if at line {i+1} (depth {depth}→{depth-1})",
+                            original_code=original_snippet,
+                            refactored_code='\n'.join(flatten_result['new_lines']),
+                            safety_score=1.0,
+                            transformation_type="Deterministic",
+                            line_start=i + 1,
+                            line_end=i + flatten_result['consumed'],
+                        ))
+                        result_lines.extend(flatten_result['new_lines'])
+                        i += flatten_result['consumed']
                         continue
 
             result_lines.append(line)
@@ -963,26 +1007,38 @@ class ConditionSimplifier:
         # Find the matching else block
         brace_count = 0
         if_end = start
+        found = False
         for i in range(start, len(lines)):
-            for ch in lines[i]:
+            line = lines[i]
+            for j, ch in enumerate(line):
                 if ch == '{':
                     brace_count += 1
+                    found = True
                 elif ch == '}':
                     brace_count -= 1
-            if brace_count == 0:
-                if_end = i
+                if found and brace_count == 0:
+                    if_end = i
+                    # Check if 'else' is on the same line after '}'
+                    remainder = line[j+1:].strip()
+                    if remainder.startswith('else'):
+                        else_start = i
+                        else_stripped = remainder
+                    else:
+                        else_start = i + 1
+                        else_stripped = None
+                    break
+            if found and brace_count == 0:
                 break
 
-        # Check if next non-empty line is 'else {'
-        else_start = if_end + 1
-        while else_start < len(lines) and lines[else_start].strip() == '':
-            else_start += 1
+        # If else was not on the same line, find the next non-empty line
+        if not else_stripped:
+            while else_start < len(lines) and lines[else_start].strip() == '':
+                else_start += 1
+            if else_start >= len(lines):
+                return None
+            else_stripped = lines[else_start].strip()
 
-        if else_start >= len(lines):
-            return None
-
-        else_stripped = lines[else_start].strip()
-        if not (else_stripped.startswith('else') or else_stripped == '} else {'):
+        if not (else_stripped.startswith('else') or else_stripped.startswith('} else')):
             return None
 
         # Find else block end
@@ -1048,6 +1104,112 @@ class ConditionSimplifier:
             if f' {op} ' in cond:
                 return cond.replace(f' {op} ', f' {neg} ', 1)
         return f'!({cond})'
+
+    def _try_flatten_nested_if(self, lines: List[str], start: int, indent: str) -> Optional[Dict]:
+        """
+        Try to flatten:
+          if (A) {
+              if (B) {
+                  // body
+              }
+          }
+        into:
+          if (A && B) {
+              // body
+          }
+        """
+        stripped = lines[start].strip()
+        m = re.match(r'^if\s*\((.+)\)\s*\{', stripped)
+        if not m:
+            return None
+        outer_cond = m.group(1).strip()
+
+        # Find the matching closing brace for outer if
+        brace_count = 0
+        outer_end = start
+        found = False
+        for i in range(start, len(lines)):
+            for ch in lines[i]:
+                if ch == '{':
+                    brace_count += 1
+                    found = True
+                elif ch == '}':
+                    brace_count -= 1
+            if found and brace_count == 0:
+                outer_end = i
+                break
+
+        # Check if the outer block only contains exactly one inner if block
+        inner_start = -1
+        statements_found = 0
+        for i in range(start + 1, outer_end):
+            l = lines[i].strip()
+            if not l: continue
+            if l.startswith('//'): continue
+            if l.startswith('if '):
+                statements_found += 1
+                inner_start = i
+            else:
+                statements_found += 1
+                
+        if statements_found != 1 or inner_start == -1:
+            return None
+            
+        inner_stripped = lines[inner_start].strip()
+        inner_m = re.match(r'^if\s*\((.+)\)\s*\{', inner_stripped)
+        if not inner_m:
+            return None
+        inner_cond = inner_m.group(1).strip()
+        
+        # Find the matching closing brace for inner if
+        brace_count = 0
+        inner_end = inner_start
+        found = False
+        for i in range(inner_start, len(lines)):
+            for ch in lines[i]:
+                if ch == '{':
+                    brace_count += 1
+                    found = True
+                elif ch == '}':
+                    brace_count -= 1
+            if found and brace_count == 0:
+                inner_end = i
+                break
+                
+        # Extract the inner body
+        inner_body_lines = lines[inner_start + 1:inner_end]
+        
+        # Build the flattened if block
+        flattened = []
+        flattened.append(f"{indent}if ({outer_cond} && {inner_cond}) {{")
+        
+        # Un-indent the body by one level
+        inner_indent = ''
+        for bl in inner_body_lines:
+            if bl.strip():
+                inner_indent = bl[:len(bl) - len(bl.lstrip())]
+                break
+        
+        step = '    ' # default step
+        if inner_indent.startswith(indent):
+            inner_if_indent = lines[inner_start][:len(lines[inner_start]) - len(lines[inner_start].lstrip())]
+            if inner_if_indent.startswith(indent):
+                step = inner_if_indent[len(indent):]
+                
+        if not step:
+            step = '    '
+            
+        for bl in inner_body_lines:
+            if bl.startswith(indent + step + step):
+                flattened.append(indent + step + bl[len(indent + step + step):])
+            elif bl.startswith(indent + step):
+                flattened.append(bl) # Couldn't properly unindent, keep as is
+            else:
+                flattened.append(bl)
+                
+        flattened.append(f"{indent}}}")
+        
+        return {'new_lines': flattened, 'consumed': outer_end - start + 1}
 
 
 class LoopOptimizer:
@@ -1484,7 +1646,10 @@ class MethodExtractor:
             call = f'{method_name}({args_str});'
         else:
             out_name = scope.out_params[0]['name'] if scope and scope.out_params else 'result'
-            call = f'{return_type} {out_name} = {method_name}({args_str});'
+            if scope and out_name in getattr(scope, 'declared_before', set()):
+                call = f'{out_name} = {method_name}({args_str});'
+            else:
+                call = f'{return_type} {out_name} = {method_name}({args_str});'
 
         return new_method, call
 
@@ -1505,17 +1670,18 @@ class MethodExtractor:
                         scope = self.scope_analyzer.analyze(
                             method_lines, block_start, block_end, method_info
                         )
-                        name = self._comment_to_method_name(comment_text)
-                        blocks.append({
-                            'suggested_name': name,
-                            'lines': method_lines[block_start:block_end + 1],
-                            'start': block_start,
-                            'end': block_end,
-                            'scope_analysis': scope,
-                            'reason': f'Comment-delimited block: "{comment_text}"',
-                        })
-                        i = block_end + 1
-                        continue
+                        if scope and scope.feasible:
+                            name = self._comment_to_method_name(comment_text)
+                            blocks.append({
+                                'suggested_name': name,
+                                'lines': method_lines[block_start:block_end + 1],
+                                'start': block_start,
+                                'end': block_end,
+                                'scope_analysis': scope,
+                                'reason': f'Comment-delimited block: "{comment_text}"',
+                            })
+                            i = block_end + 1
+                            continue
             i += 1
         return blocks
 
@@ -1529,14 +1695,15 @@ class MethodExtractor:
                     scope = self.scope_analyzer.analyze(
                         method_lines, i, end, method_info
                     )
-                    blocks.append({
-                        'suggested_name': f'process{self._loop_var_name(stripped)}',
-                        'lines': method_lines[i:end + 1],
-                        'start': i,
-                        'end': end,
-                        'scope_analysis': scope,
-                        'reason': 'Long loop body suitable for extraction',
-                    })
+                    if scope and scope.feasible:
+                        blocks.append({
+                            'suggested_name': f'process{self._loop_var_name(stripped)}',
+                            'lines': method_lines[i:end + 1],
+                            'start': i,
+                            'end': end,
+                            'scope_analysis': scope,
+                            'reason': 'Long loop body suitable for extraction',
+                        })
         return blocks
 
     def _find_statement_chunks(self, method_lines: List[str], method_info: MethodInfo) -> List[Dict]:
@@ -2179,7 +2346,9 @@ class BehaviorDecomposer:
         """Split a method body into responsibility blocks."""
         blocks: List[ResponsibilityBlock] = []
         current_lines: List[str] = []
-        current_start = 0
+        
+        m_start = method_dict.get('start_line', 1)
+        current_start = m_start
         current_type = 'general'
         current_desc = ''
 
@@ -2190,11 +2359,11 @@ class BehaviorDecomposer:
             if stripped.startswith('//') and not stripped.startswith('///'):
                 if current_lines and len(current_lines) >= 3:
                     blocks.append(self._make_responsibility_block(
-                        current_type, current_start, i - 1 + (method_dict.get('start_line', 1)),
+                        current_type, current_start, i - 1 + m_start,
                         current_lines, current_desc,
                     ))
                 current_lines = []
-                current_start = i
+                current_start = i + 1 + m_start
                 current_type = 'commented_block'
                 current_desc = stripped.lstrip('/ ').strip()
                 continue
@@ -2203,12 +2372,11 @@ class BehaviorDecomposer:
             if stripped == '' and current_lines:
                 if len(current_lines) >= 3:
                     blocks.append(self._make_responsibility_block(
-                        current_type, current_start,
-                        current_start + len(current_lines) - 1 + (method_dict.get('start_line', 1)),
+                        current_type, current_start, i - 1 + m_start,
                         current_lines, current_desc,
                     ))
                 current_lines = []
-                current_start = i + 1
+                current_start = i + 1 + m_start
                 current_type = 'general'
                 current_desc = ''
                 continue
@@ -2217,8 +2385,7 @@ class BehaviorDecomposer:
 
         if current_lines and len(current_lines) >= 3:
             blocks.append(self._make_responsibility_block(
-                current_type, current_start,
-                current_start + len(current_lines) - 1 + (method_dict.get('start_line', 1)),
+                current_type, current_start, len(method_lines) - 1 + m_start,
                 current_lines, current_desc,
             ))
 
@@ -3378,9 +3545,11 @@ class JavaRefactoringEngine:
                         refactored_code = refactored_code.replace(orig, repl, 1)
 
                 # Insert new methods before class closing brace
-                cls_end = cls.get('end_line', len(lines))
                 ref_lines = refactored_code.split('\n')
-                insert_idx = min(cls_end - 1, len(ref_lines))
+                insert_idx = len(ref_lines) - 1
+                while insert_idx > 0 and '}' not in ref_lines[insert_idx]:
+                    insert_idx -= 1
+                
                 for nm in new_methods_code:
                     ref_lines.insert(insert_idx, nm)
                     insert_idx += 1

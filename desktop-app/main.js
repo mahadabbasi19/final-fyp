@@ -726,18 +726,33 @@ ipcMain.handle('run:file', async (event, { filePath, cwd }) => {
     '.sh': `bash "${filePath}"`,
     '.ps1': `powershell -File "${filePath}"`,
   };
+  // Shell syntax differs: PowerShell on Windows uses `; if ($?) { & "x" }`,
+  // while zsh/bash on macOS/Linux use `&& "x"`. Emitting PowerShell into zsh
+  // produced `parse error near '&'`. Build the command per-platform.
+  const isWin = process.platform === 'win32';
+  const call = (bin) => (isWin ? `& "${bin}"` : `"${bin}"`);          // invoke an absolute path
+  const chain = isWin ? '; if ($?) ' : ' && ';                         // run next only if prev succeeded
+  const wrap = (cmd) => (isWin ? `{ ${cmd} }` : cmd);
+
   if (ext === '.java') {
     const cn = path.basename(filePath, '.java');
     const dir = path.dirname(filePath);
+    const fileName = path.basename(filePath);
     if (JAVA_HOME) {
       const javacPath = path.join(JAVA_HOME, 'bin', 'javac');
       const javaPath = path.join(JAVA_HOME, 'bin', 'java');
-      return { command: `cd "${dir}"; & "${javacPath}" "${path.basename(filePath)}"; if ($?) { & "${javaPath}" ${cn} }` };
+      return { command: `cd "${dir}"${isWin ? ';' : ' &&'} ${call(javacPath)} "${fileName}"${chain}${wrap(`${call(javaPath)} ${cn}`)}` };
     }
-    return { command: `cd "${dir}"; javac "${path.basename(filePath)}"; if ($?) { java ${cn} }` };
+    return { command: `cd "${dir}"${isWin ? ';' : ' &&'} javac "${fileName}"${chain}${wrap(`java ${cn}`)}` };
   }
-  if (ext === '.cpp' || ext === '.cc') return { command: `g++ "${filePath}" -o "${filePath}.exe"; if ($?) { & "${filePath}.exe" }` };
-  if (ext === '.c') return { command: `gcc "${filePath}" -o "${filePath}.exe"; if ($?) { & "${filePath}.exe" }` };
+  if (ext === '.cpp' || ext === '.cc') {
+    const out = isWin ? `${filePath}.exe` : `${filePath}.out`;
+    return { command: `g++ "${filePath}" -o "${out}"${chain}${wrap(call(out))}` };
+  }
+  if (ext === '.c') {
+    const out = isWin ? `${filePath}.exe` : `${filePath}.out`;
+    return { command: `gcc "${filePath}" -o "${out}"${chain}${wrap(call(out))}` };
+  }
   if (commands[ext]) return { command: commands[ext] };
   throw new Error(`No run configuration for: ${ext}`);
 });
