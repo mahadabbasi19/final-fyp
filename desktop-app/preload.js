@@ -12,6 +12,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // --- Dialogs ---
   openFolder: () => ipcRenderer.invoke('dialog:openFolder'),
+  getLastFolder: () => ipcRenderer.invoke('workspace:getLastFolder'),
+  clearLastFolder: () => ipcRenderer.invoke('workspace:clearLastFolder'),
   openFile: () => ipcRenderer.invoke('dialog:openFile'),
   saveAs: (opts) => ipcRenderer.invoke('dialog:saveAs', opts),
 

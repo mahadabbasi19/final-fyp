@@ -689,11 +689,26 @@ async def dependency_graph(request: DependencyGraphRequest):
         long_methods = metrics.get('long_methods', 0)
         duplicate_blocks = metrics.get('duplicate_blocks', 0)
 
-        # Normalize to 0-100 scale for radar chart
+        # Maintainability = the REAL Maintainability Index (same value the AI
+        # chat health card shows), not a crude 100-complexity*10 heuristic.
+        # Previously the radar showed 20 while chat showed 96.6 for identical
+        # code — an inconsistency between two different formulas.
+        try:
+            halstead = HalsteadCalculator().analyze(request.java_code)
+            comment_ratio = (metrics.get('comment_lines', 0) / total_lines) if total_lines else 0.0
+            mi = MaintainabilityIndexCalculator.calculate(
+                halstead_volume=halstead.get('volume', 0.0),
+                cyclomatic_complexity=avg_complexity,
+                loc=max(1, code_lines),
+                comment_ratio=comment_ratio,
+            )
+        except Exception:
+            mi = max(0, min(100, 100 - avg_complexity * 10))
+
         radar = {
             "labels": ["Maintainability", "Simplicity", "Readability", "Modularity", "Duplication Free"],
             "values": [
-                max(0, min(100, 100 - avg_complexity * 10)),    # Maintainability
+                max(0, min(100, round(mi, 1))),                  # Maintainability (real MI)
                 max(0, min(100, 100 - max_complexity * 5)),      # Simplicity
                 max(0, min(100, 100 - max_nesting * 15)),        # Readability
                 max(0, min(100, min(total_methods, 10) * 10)),   # Modularity

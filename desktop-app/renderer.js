@@ -398,9 +398,28 @@
     // Focus editor so keyboard shortcuts work
     setTimeout(() => state.editor.focus(), 50);
 
-    // Auto-update graph when switching to a Java file
+    // Dynamic per-file diagnostics: wipe the previous file's Problems +
+    // markers instantly, then check ONLY the newly active file.
+    clearProblems();
     if (isJavaFile(tab) && state.backendReady) {
       updateGraph();
+      state.errorCheckLastCode = '';       // force a fresh check (bypass dedupe)
+      checkErrors();                        // fire immediately, no debounce
+    }
+  }
+
+  // Instantly reset the Problems view + editor markers + status bar.
+  function clearProblems() {
+    state.errorCheckSeq++;                  // invalidate any in-flight response
+    const container = document.getElementById('problems-list');
+    if (container) container.innerHTML = '<p class="muted">No problems detected.</p>';
+    const badge = document.getElementById('problems-count');
+    if (badge) badge.style.display = 'none';
+    const status = document.getElementById('status-errors');
+    if (status) status.innerHTML = '<i class="codicon codicon-error"></i> 0 <i class="codicon codicon-warning"></i> 0';
+    if (window.monaco && state.editor) {
+      const m = state.editor.getModel();
+      if (m) monaco.editor.setModelMarkers(m, 'java-errors', []);
     }
   }
 
@@ -479,15 +498,22 @@
 
   async function openFolderDialog() {
     const result = await api.openFolder();
-    if (!result.canceled) {
-      state.workspacePath = result.path;
-      const folderName = result.path.split(/[\\/]/).pop();
+    if (!result.canceled) await loadWorkspace(result.path);
+  }
+
+  // Load a folder into the workspace view (shared by manual open + session restore).
+  async function loadWorkspace(folderPath) {
+    try {
+      state.workspacePath = folderPath;
+      const folderName = folderPath.split(/[\\/]/).pop();
       document.getElementById('workspace-name').textContent = folderName.toUpperCase();
       document.getElementById('open-folder-prompt').style.display = 'none';
       document.getElementById('explorer-actions').style.display = 'flex';
-      await renderFileTree(result.path, document.getElementById('file-tree'));
-      // Auto-refresh git status when folder opens
+      await renderFileTree(folderPath, document.getElementById('file-tree'));
       setTimeout(() => gitRefresh(), 500);
+    } catch (err) {
+      console.warn('Failed to load workspace:', err.message);
+      api.clearLastFolder?.();   // stale/deleted path — forget it
     }
   }
 
@@ -3996,6 +4022,12 @@
     // Init SCM bindings
     initScmBindings();
     origActivityClickSetup();
+
+    // Session restore: reopen the last workspace folder automatically.
+    try {
+      const last = await api.getLastFolder?.();
+      if (last) await loadWorkspace(last);
+    } catch (_) {}
   }
 
   init();

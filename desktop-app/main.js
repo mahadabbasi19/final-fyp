@@ -573,10 +573,18 @@ function buildAppMenu() {
 ipcMain.handle('dialog:openFolder', async () => {
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   if (!result.canceled && result.filePaths.length > 0) {
+    writeUserConfig({ last_folder: result.filePaths[0] });   // persist session
     return { canceled: false, path: result.filePaths[0] };
   }
   return { canceled: true };
 });
+
+// Return the last-opened folder if it still exists (for session restore).
+ipcMain.handle('workspace:getLastFolder', () => {
+  const p = readUserConfig().last_folder;
+  return (p && fs.existsSync(p)) ? p : null;
+});
+ipcMain.handle('workspace:clearLastFolder', () => { writeUserConfig({ last_folder: null }); });
 
 ipcMain.handle('dialog:openFile', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
