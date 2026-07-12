@@ -60,6 +60,10 @@ jobs:
         working-directory: desktop-app
         run: npm ci --no-audit --no-fund
 
+      - name: Rebuild native modules for Electron (node-pty)
+        working-directory: desktop-app
+        run: npx electron-rebuild -f -w node-pty
+
       - name: Build collab bundle
         working-directory: desktop-app
         run: npm run build:collab
@@ -68,7 +72,6 @@ jobs:
         working-directory: desktop-app
         run: npx electron-builder --win
         env:
-          # electron-builder auto-rebuilds node-pty for Electron's ABI
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: List artifacts

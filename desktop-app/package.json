@@ -74,8 +74,7 @@
         {
           "target": "dmg",
           "arch": [
-            "arm64",
-            "x64"
+            "arm64"
           ]
         }
       ],
@@ -84,7 +83,8 @@
       "identity": null
     },
     "dmg": {
-      "title": "CodeNova IDE",
+      "title": "CodeNova AI",
+      "artifactName": "CodeNova-AI.dmg",
       "contents": [
         {
           "x": 130,

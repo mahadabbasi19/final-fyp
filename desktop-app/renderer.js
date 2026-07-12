@@ -96,8 +96,22 @@
             smoothScrolling: true,
             bracketPairColorization: { enabled: true },
             guides: { bracketPairs: true, indentation: true },
-            suggest: { snippetsPreventQuickSuggestions: false },
             padding: { top: 8 },
+            // IntelliSense-style completion (like VS Code): suggestions pop
+            // as you type, Tab/Enter accepts, snippets expand inline.
+            quickSuggestions: { other: true, comments: false, strings: false },
+            quickSuggestionsDelay: 60,
+            suggestOnTriggerCharacters: true,
+            acceptSuggestionOnEnter: 'on',
+            tabCompletion: 'on',
+            snippetSuggestions: 'top',
+            wordBasedSuggestions: 'currentDocument',
+            parameterHints: { enabled: true },
+            suggest: {
+              snippetsPreventQuickSuggestions: false,
+              showKeywords: true, showSnippets: true, showWords: true,
+              preview: true,
+            },
           });
 
           // Cursor position updates
@@ -156,11 +170,112 @@
             openFolderDialog();
           });
 
+          registerCompletionProviders();
           resolve();
         });
       };
       document.head.appendChild(amdLoader);
     });
+  }
+
+  // =========================================================================
+  // Auto-completion + live-template snippets (VS Code-style)
+  //   Type "sout" then Tab/Enter → System.out.println();
+  //   Plus keyword/API IntelliSense as you type.
+  // =========================================================================
+  function registerCompletionProviders() {
+    if (window.__completionRegistered || !window.monaco) return;
+    window.__completionRegistered = true;
+    const K = monaco.languages.CompletionItemKind;
+    const RULE = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+
+    // ${N} = tab stop, ${N:default} = placeholder, ${N|a,b|} = choice.
+    const JAVA_SNIPPETS = [
+      ['sout', 'System.out.println(${1});$0', 'Print to standard output'],
+      ['souf', 'System.out.printf(${1:"%s"}, ${2});$0', 'Formatted print'],
+      ['soutv', 'System.out.println("${1:var} = " + ${1:var});$0', 'Print a variable'],
+      ['serr', 'System.err.println(${1});$0', 'Print to standard error'],
+      ['psvm', 'public static void main(String[] args) {\n\t$0\n}', 'main method'],
+      ['main', 'public static void main(String[] args) {\n\t$0\n}', 'main method'],
+      ['fori', 'for (int ${1:i} = 0; ${1:i} < ${2:n}; ${1:i}++) {\n\t$0\n}', 'Indexed for loop'],
+      ['forr', 'for (int ${1:i} = ${2:n} - 1; ${1:i} >= 0; ${1:i}--) {\n\t$0\n}', 'Reverse for loop'],
+      ['foreach', 'for (${1:Type} ${2:item} : ${3:collection}) {\n\t$0\n}', 'Enhanced for loop'],
+      ['iter', 'for (${1:Type} ${2:item} : ${3:collection}) {\n\t$0\n}', 'Enhanced for loop'],
+      ['if', 'if (${1:condition}) {\n\t$0\n}', 'if statement'],
+      ['ifelse', 'if (${1:condition}) {\n\t$2\n} else {\n\t$0\n}', 'if-else statement'],
+      ['elif', 'else if (${1:condition}) {\n\t$0\n}', 'else if'],
+      ['while', 'while (${1:condition}) {\n\t$0\n}', 'while loop'],
+      ['dowhile', 'do {\n\t$0\n} while (${1:condition});', 'do-while loop'],
+      ['switch', 'switch (${1:var}) {\n\tcase ${2:value}:\n\t\t$0\n\t\tbreak;\n\tdefault:\n\t\tbreak;\n}', 'switch statement'],
+      ['trycatch', 'try {\n\t$1\n} catch (${2:Exception} ${3:e}) {\n\t$0\n}', 'try-catch'],
+      ['tryf', 'try {\n\t$1\n} catch (${2:Exception} ${3:e}) {\n\t$4\n} finally {\n\t$0\n}', 'try-catch-finally'],
+      ['class', 'public class ${1:Name} {\n\t$0\n}', 'class declaration'],
+      ['interface', 'public interface ${1:Name} {\n\t$0\n}', 'interface declaration'],
+      ['method', 'public ${1:void} ${2:name}(${3}) {\n\t$0\n}', 'method'],
+      ['ctor', 'public ${1:ClassName}(${2}) {\n\t$0\n}', 'constructor'],
+      ['sopt', 'System.out.print(${1});$0', 'Print without newline'],
+      ['list', 'List<${1:Type}> ${2:list} = new ArrayList<>();$0', 'ArrayList'],
+      ['map', 'Map<${1:K}, ${2:V}> ${3:map} = new HashMap<>();$0', 'HashMap'],
+      ['scan', 'Scanner ${1:sc} = new Scanner(System.in);$0', 'Scanner'],
+      ['try', 'try {\n\t$1\n} catch (${2:Exception} ${3:e}) {\n\t$0\n}', 'try-catch'],
+    ];
+    // Common Java identifiers for keyword-style IntelliSense.
+    const JAVA_WORDS = ['System','String','Integer','Double','Boolean','Object','List','ArrayList','Map','HashMap','Set','HashSet','Scanner','Math','Arrays','Collections','StringBuilder','Exception','RuntimeException','public','private','protected','static','final','void','int','double','boolean','char','long','float','return','new','null','true','false','this','super','class','interface','extends','implements','import','package','throws','throw','println','printf','length','size','add','get','put','equals','toString','valueOf'];
+
+    const buildJava = (range) => {
+      const items = JAVA_SNIPPETS.map(([label, body, doc]) => ({
+        label, kind: K.Snippet, insertText: body, insertTextRules: RULE,
+        documentation: doc, detail: 'CodeNova snippet', range, sortText: '0' + label,
+      }));
+      for (const w of JAVA_WORDS) {
+        items.push({ label: w, kind: K.Keyword, insertText: w, range, sortText: '1' + w });
+      }
+      return items;
+    };
+
+    monaco.languages.registerCompletionItemProvider('java', {
+      triggerCharacters: ['.', ' '],
+      provideCompletionItems(model, position) {
+        const word = model.getWordUntilPosition(position);
+        const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+          startColumn: word.startColumn, endColumn: word.endColumn };
+        return { suggestions: buildJava(range) };
+      },
+    });
+
+    // Lightweight snippets for JS & Python too, so the feature isn't Java-only.
+    const OTHER = {
+      javascript: [
+        ['log', 'console.log(${1});$0', 'console.log'],
+        ['fun', 'function ${1:name}(${2}) {\n\t$0\n}', 'function'],
+        ['fori', 'for (let ${1:i} = 0; ${1:i} < ${2:n}; ${1:i}++) {\n\t$0\n}', 'for loop'],
+        ['forof', 'for (const ${1:item} of ${2:arr}) {\n\t$0\n}', 'for-of'],
+        ['if', 'if (${1:cond}) {\n\t$0\n}', 'if'],
+        ['arrow', 'const ${1:fn} = (${2}) => {\n\t$0\n};', 'arrow function'],
+      ],
+      python: [
+        ['print', 'print(${1})$0', 'print'],
+        ['def', 'def ${1:name}(${2}):\n\t$0', 'function'],
+        ['fori', 'for ${1:i} in range(${2:n}):\n\t$0', 'for loop'],
+        ['forin', 'for ${1:item} in ${2:iterable}:\n\t$0', 'for-in'],
+        ['if', 'if ${1:cond}:\n\t$0', 'if'],
+        ['main', 'if __name__ == "__main__":\n\t$0', 'main guard'],
+        ['class', 'class ${1:Name}:\n\tdef __init__(self${2}):\n\t\t$0', 'class'],
+      ],
+    };
+    for (const [lang, snips] of Object.entries(OTHER)) {
+      monaco.languages.registerCompletionItemProvider(lang, {
+        provideCompletionItems(model, position) {
+          const word = model.getWordUntilPosition(position);
+          const range = { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+            startColumn: word.startColumn, endColumn: word.endColumn };
+          return { suggestions: snips.map(([label, body, doc]) => ({
+            label, kind: K.Snippet, insertText: body, insertTextRules: RULE,
+            documentation: doc, detail: 'CodeNova snippet', range, sortText: '0' + label,
+          })) };
+        },
+      });
+    }
   }
 
   // =========================================================================

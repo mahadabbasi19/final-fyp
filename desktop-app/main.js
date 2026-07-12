@@ -10,6 +10,15 @@ const fsPromises = fs.promises;
 const os = require('os');
 const { spawn } = require('child_process');
 
+// Crash hardening: never let an unexpected error kill the app silently
+// (the #1 "app crashes on Windows" cause). Log it and keep running.
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err && err.stack ? err.stack : err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+
 app.disableHardwareAcceleration();
 
 // Single-instance lock. Two app instances share port 8000 but have DIFFERENT
@@ -975,7 +984,15 @@ ipcMain.handle('backend:gitStashList', async (event, { repo_path }) => {
 // ---------------------------------------------------------------------------
 // Embedded Collaboration Host — the app itself hosts the live session
 // ---------------------------------------------------------------------------
-const collabHost = require('./collab-host');
+// Guarded: if the collab deps (yjs/ws/y-protocols) fail to load in the
+// packaged app, collaboration disables gracefully instead of crashing
+// the whole IDE at startup.
+let collabHost = { startHost: async () => ({ error: 'Collaboration unavailable in this build.' }), stopHost: () => {}, hostInfo: () => ({ running: false }) };
+try {
+  collabHost = require('./collab-host');
+} catch (e) {
+  console.warn('[collab] host module failed to load:', e.message);
+}
 
 ipcMain.handle('collab:hostStart', async () => {
   try {
@@ -1172,8 +1189,17 @@ function getShellArgs(shellPath) {
 // App Lifecycle
 // ---------------------------------------------------------------------------
 app.whenReady().then(async () => {
-  buildAppMenu();
-  createWindow();
+  try {
+    buildAppMenu();
+  } catch (e) { console.error('buildAppMenu failed:', e.message); }
+  try {
+    createWindow();
+  } catch (e) {
+    console.error('createWindow failed:', e.message);
+    dialog.showErrorBox('CodeNova IDE — startup error',
+      'The window failed to open:\n' + e.message + '\n\nPlease reinstall the app.');
+    return;
+  }
 
   // Notify the renderer about JDK availability once the UI is loaded —
   // drives the "JDK not found" startup toast (this IDE is Java-focused,
