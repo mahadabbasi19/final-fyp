@@ -60,15 +60,14 @@ jobs:
         working-directory: desktop-app
         run: npm ci --no-audit --no-fund
 
-      - name: Rebuild native modules for Electron (node-pty)
-        working-directory: desktop-app
-        run: npx electron-rebuild -f -w node-pty
-
       - name: Build collab bundle
         working-directory: desktop-app
         run: npm run build:collab
 
       - name: Build Windows installer
+        # electron-builder rebuilds native modules (node-pty) for Electron's
+        # ABI during packaging (npmRebuild defaults to true) — no separate
+        # electron-rebuild step needed.
         working-directory: desktop-app
         run: npx electron-builder --win
         env:
