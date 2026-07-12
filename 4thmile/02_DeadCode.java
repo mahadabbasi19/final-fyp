@@ -1,17 +1,10 @@
-import java.util.List;
-import java.util.Map;      // unused import  -> removed
-
 // FEATURE: Dead Code Removal (unused private field + unused private method)
+// This is the REFACTORED result: the unused Map/List imports, the unused
+// private field, and the never-called private method have been removed.
 public class DeadCode {
-
-    private int unusedCounter = 0;          // never used -> removed
 
     public int add(int a, int b) {
         return a + b;
-    }
-
-    private void debugLog() {               // never called -> removed
-        System.out.println("debug");
     }
 
     public void run() {
