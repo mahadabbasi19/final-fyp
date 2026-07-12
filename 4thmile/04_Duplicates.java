@@ -1,7 +1,7 @@
-public class DuplicateDemo {
+// FEATURE: Duplicate Detection (token-normalized: catches renamed clones)
+// sumPair and addPair are structurally identical.
+public class Duplicates {
 
-    // These two methods are structurally identical (renamed variables only).
-    // The engine's token-normalized detector flags them as duplicates.
     public int sumPair(int x, int y) {
         int result = x + y;
         return result;

@@ -725,17 +725,26 @@ class UnusedImportRemover:
 
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if stripped.startswith('import ') and stripped.endswith(';'):
-                fq = stripped[len('import '):].rstrip(';').strip()
+            # Strip any trailing line comment so 'import x;  // note' is still
+            # recognized (previously the endswith(';') check failed on it).
+            no_comment = re.sub(r'//.*$', '', stripped).strip()
+            if no_comment.startswith('import ') and no_comment.endswith(';'):
+                fq = no_comment[len('import '):].rstrip(';').strip()
                 if fq.startswith('static '):
                     fq = fq[len('static '):]
                 simple = fq.rsplit('.', 1)[-1]
                 if simple != '*':
                     import_lines.append((i, line, simple))
 
-        # Build body text excluding all import lines
+        # Build body text excluding all import lines, then strip comments and
+        # string/char literals so a type mentioned only in a comment or string
+        # ("removes the unused ArrayList import") is NOT counted as real usage.
         import_indices = {idx for idx, _, _ in import_lines}
         body = '\n'.join(l for i, l in enumerate(lines) if i not in import_indices)
+        body = re.sub(r'/\*.*?\*/', ' ', body, flags=re.DOTALL)   # block comments
+        body = re.sub(r'//[^\n]*', ' ', body)                     # line comments
+        body = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', body)         # string literals
+        body = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", body)         # char literals
 
         lines_to_remove: Set[int] = set()
         for idx, full_line, simple_name in import_lines:
