@@ -34,10 +34,50 @@ let nextTerminalId = 1;
 // ---------------------------------------------------------------------------
 // Java Auto-Detection
 // ---------------------------------------------------------------------------
+
+// Per-user config (shared with the backend) — used to remember a JDK the
+// user located manually via the "Locate JDK" picker.
+function userConfigPath() {
+  return path.join(os.homedir(), '.codenova', 'config.json');
+}
+function readUserConfig() {
+  try { return JSON.parse(fs.readFileSync(userConfigPath(), 'utf-8')); }
+  catch { return {}; }
+}
+function writeUserConfig(patch) {
+  const dir = path.join(os.homedir(), '.codenova');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (_) {}
+  const cfg = { ...readUserConfig(), ...patch };
+  fs.writeFileSync(userConfigPath(), JSON.stringify(cfg, null, 2));
+  return cfg;
+}
+
+// Validate that a folder is a real JDK (has the javac compiler, not just a JRE).
+function isValidJdk(home) {
+  if (!home) return false;
+  const javacName = process.platform === 'win32' ? 'javac.exe' : 'javac';
+  return fs.existsSync(path.join(home, 'bin', javacName));
+}
+
+// Detect whether a JRE (java runtime) exists even when no JDK does — lets us
+// tell the user precisely "you have a runtime but need the JDK" instead of a
+// vague "not found".
+function hasJreOnly() {
+  try {
+    const cp = require('child_process');
+    const r = cp.spawnSync('java', ['-version'], { encoding: 'utf-8', timeout: 3000 });
+    return r.status === 0;
+  } catch { return false; }
+}
+
 function findJavaHome() {
   const isWin = process.platform === 'win32';
   const isMac = process.platform === 'darwin';
   const javacName = isWin ? 'javac.exe' : 'javac';
+
+  // 0. A JDK the user located manually (highest priority — they chose it).
+  const savedJdk = readUserConfig().jdk_home;
+  if (isValidJdk(savedJdk)) return savedJdk;
 
   // 1. Honour JAVA_HOME if it points at a usable JDK.
   if (process.env.JAVA_HOME && fs.existsSync(path.join(process.env.JAVA_HOME, 'bin', javacName))) {
@@ -57,11 +97,17 @@ function findJavaHome() {
   // 3. Platform-specific install roots.
   const searchDirs = isWin
     ? [
-        'C:\\Program Files\\Microsoft',
         'C:\\Program Files\\Java',
-        'C:\\Program Files\\Eclipse Adoptium',
+        'C:\\Program Files\\Microsoft',           // Microsoft OpenJDK
+        'C:\\Program Files\\Eclipse Adoptium',    // Temurin
+        'C:\\Program Files\\Eclipse Foundation',
         'C:\\Program Files\\Zulu',
         'C:\\Program Files\\Amazon Corretto',
+        'C:\\Program Files\\BellSoft',            // Liberica
+        'C:\\Program Files\\RedHat',
+        'C:\\Program Files\\AdoptOpenJDK',
+        'C:\\Program Files (x86)\\Java',
+        'C:\\Program Files (x86)\\Eclipse Adoptium',
       ]
     : isMac
     ? [
@@ -93,37 +139,99 @@ function findJavaHome() {
     } catch (_) {}
   }
 
-  // 4. Last resort: `which javac` (Unix-like). macOS ships a /usr/bin/javac
-  // STUB that exists even without a JDK and prints "Unable to locate a Java
-  // Runtime" — so verify it actually runs before trusting it.
-  if (!isWin) {
+  // 4. Windows registry — the authoritative record of installed JDKs.
+  if (isWin) {
     try {
       const cp = require('child_process');
-      const out = cp.execFileSync('which', ['javac'], { encoding: 'utf-8', timeout: 1500 }).trim();
-      if (out) {
-        const check = cp.spawnSync(out, ['-version'], { encoding: 'utf-8', timeout: 3000 });
-        if (check.status === 0) {
-          return path.dirname(path.dirname(out));
+      const keys = [
+        'HKLM\\SOFTWARE\\JavaSoft\\JDK',
+        'HKLM\\SOFTWARE\\JavaSoft\\Java Development Kit',
+        'HKLM\\SOFTWARE\\WOW6432Node\\JavaSoft\\JDK',
+      ];
+      for (const key of keys) {
+        const out = cp.spawnSync('reg', ['query', key, '/s', '/v', 'JavaHome'], { encoding: 'utf-8', timeout: 4000 });
+        if (out.status === 0 && out.stdout) {
+          const matches = [...out.stdout.matchAll(/JavaHome\s+REG_SZ\s+(.+)/g)].map(m => m[1].trim());
+          for (const home of matches.reverse()) {  // newest last → try newest first
+            if (isValidJdk(home)) return home;
+          }
         }
       }
     } catch (_) {}
   }
 
+  // 5. Last resort: `where javac` (Windows) / `which javac` (Unix). On macOS
+  // /usr/bin/javac is a STUB even without a JDK, so verify it actually runs.
+  try {
+    const cp = require('child_process');
+    const finder = isWin ? 'where' : 'which';
+    const out = cp.spawnSync(finder, ['javac'], { encoding: 'utf-8', timeout: 2000 });
+    if (out.status === 0 && out.stdout) {
+      const first = out.stdout.split(/\r?\n/).find(Boolean);
+      if (first) {
+        const check = cp.spawnSync(first.trim(), ['-version'], { encoding: 'utf-8', timeout: 3000 });
+        if (check.status === 0) return path.dirname(path.dirname(first.trim()));
+      }
+    }
+  } catch (_) {}
+
   return null;
 }
 
-const JAVA_HOME = findJavaHome();
-if (JAVA_HOME) {
-  const javaBin = path.join(JAVA_HOME, 'bin');
+// Apply a JDK home to this process's environment so BOTH the Python backend
+// and every integrated terminal (spawned with env: process.env) can run javac.
+function applyJavaHome(home) {
+  if (!home) return;
+  const javaBin = path.join(home, 'bin');
   const pathSep = process.platform === 'win32' ? ';' : ':';
-  if (!process.env.PATH.split(pathSep).includes(javaBin)) {
-    process.env.PATH = javaBin + pathSep + process.env.PATH;
+  if (!(process.env.PATH || '').split(pathSep).includes(javaBin)) {
+    process.env.PATH = javaBin + pathSep + (process.env.PATH || '');
   }
-  process.env.JAVA_HOME = JAVA_HOME;
-  console.log('Java detected:', JAVA_HOME);
-} else {
-  console.warn('Java JDK not found. Java compilation will not work.');
+  process.env.JAVA_HOME = home;
 }
+
+let JAVA_HOME = findJavaHome();
+if (JAVA_HOME) {
+  applyJavaHome(JAVA_HOME);
+  console.log('JDK detected:', JAVA_HOME);
+} else {
+  console.warn('JDK not found. Java compile/run disabled until a JDK is located.');
+}
+
+// Let the renderer query / re-detect / manually locate the JDK.
+ipcMain.handle('java:status', () => ({
+  found: !!JAVA_HOME,
+  home: JAVA_HOME || null,
+  jreOnly: !JAVA_HOME && hasJreOnly(),
+}));
+
+ipcMain.handle('java:redetect', () => {
+  JAVA_HOME = findJavaHome();
+  if (JAVA_HOME) applyJavaHome(JAVA_HOME);
+  return { found: !!JAVA_HOME, home: JAVA_HOME || null, jreOnly: !JAVA_HOME && hasJreOnly() };
+});
+
+// Folder picker: user points at their JDK; we validate, persist, and apply it
+// live (no restart) so new terminals and the backend pick it up.
+ipcMain.handle('java:locate', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: 'Select your JDK folder (the one containing bin\\javac)',
+    properties: ['openDirectory'],
+    message: 'Choose the JDK installation folder, e.g. C:\\Program Files\\Java\\jdk-21',
+  });
+  if (result.canceled || !result.filePaths.length) return { canceled: true };
+  let chosen = result.filePaths[0];
+  // Be forgiving: accept the bin folder or a parent that contains the JDK.
+  const candidates = [chosen, path.dirname(chosen), path.join(chosen, '..')];
+  const valid = candidates.find(isValidJdk);
+  if (!valid) {
+    return { canceled: false, error: 'That folder does not contain bin/javac. Pick the JDK root folder (e.g. jdk-21), not the JRE.' };
+  }
+  writeUserConfig({ jdk_home: valid });
+  JAVA_HOME = valid;
+  applyJavaHome(valid);
+  return { canceled: false, found: true, home: valid };
+});
 
 // ---------------------------------------------------------------------------
 // Python Backend Process Management
@@ -1008,6 +1116,7 @@ app.whenReady().then(async () => {
     mainWindow?.webContents.send('java:status', {
       found: !!JAVA_HOME,
       home: JAVA_HOME || null,
+      jreOnly: !JAVA_HOME && hasJreOnly(),
     });
   });
 

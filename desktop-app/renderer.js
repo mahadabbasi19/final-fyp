@@ -3645,6 +3645,13 @@
         if (n && n.trim()) { localStorage.setItem('collab.username', n.trim()); showNotification('Name saved.', 'info'); }
       }},
       '---',
+      { icon: 'coffee', label: 'Set Java (JDK) location…', action: async () => {
+        const r = await api.javaLocate?.();
+        if (!r || r.canceled) return;
+        if (r.error) { showNotification(r.error, 'error'); return; }
+        if (r.found) showNotification('JDK set: ' + r.home + '. Open a new terminal to use javac.', 'info');
+      }},
+      '---',
       { icon: 'settings-gear', label: 'Settings', action: showSettingsPage },
       { icon: 'keyboard', label: 'Keyboard Shortcuts', action: showKeybindingsPage },
       { icon: 'trash', label: 'Clear Saved Data (tokens, repo URLs)', action: () => {
@@ -3669,21 +3676,33 @@
 
   api.onJavaStatus?.((s) => {
     if (s.found) return;
-    // Snooze for 3 days after dismissal so the toast doesn't nag every launch.
     const snoozed = parseInt(localStorage.getItem('jdk.toast.snoozeUntil') || '0');
     if (Date.now() < snoozed) return;
+    showJdkToast(s.jreOnly);
+  });
+
+  function showJdkToast(jreOnly) {
+    document.getElementById('jdk-toast')?.remove();
+    // JRE-only is the most common confusion: `java` works but `javac` (the
+    // compiler) is missing. Say exactly that instead of a vague "not found".
+    const headline = jreOnly ? 'Java compiler (JDK) not found' : 'Java (JDK) not found';
+    const body = jreOnly
+      ? 'You have the Java <b>runtime</b> (JRE) installed, but compiling and running Java needs the <b>JDK</b> — which includes <code>javac</code>. Install a JDK, or point CodeNova at one you already have.'
+      : 'To compile and run Java, CodeNova needs a JDK. Editing, refactoring, and AI chat work without it.';
 
     const toast = document.createElement('div');
-    toast.style.cssText = 'position:fixed;right:16px;bottom:44px;z-index:10002;width:360px;background:#252526;border:1px solid #454545;border-left:3px solid #cca700;border-radius:5px;padding:14px 16px;box-shadow:0 6px 20px rgba(0,0,0,.5);font-size:13px;color:#ddd';
+    toast.id = 'jdk-toast';
+    toast.style.cssText = 'position:fixed;right:16px;bottom:44px;z-index:10002;width:400px;background:#252526;border:1px solid #454545;border-left:3px solid #cca700;border-radius:6px;padding:16px;box-shadow:0 8px 24px rgba(0,0,0,.55);font-size:13px;color:#ddd';
     toast.innerHTML = `
       <div style="display:flex;gap:10px">
         <i class="codicon codicon-warning" style="color:#cca700;font-size:16px;margin-top:1px"></i>
         <div style="flex:1">
-          <div style="font-weight:600;margin-bottom:4px">Java JDK not found</div>
-          <div style="color:#9a9a9a;line-height:1.45">CodeNova needs a JDK to compile and run Java code and for full-precision error checking. Editing, refactoring, and AI chat work without it.</div>
-          <div style="display:flex;gap:8px;margin-top:12px">
-            <button id="jdk-install" style="background:#0e639c;color:#fff;border:none;padding:5px 12px;border-radius:2px;cursor:pointer">Install JDK</button>
-            <button id="jdk-later" style="background:#3c3c3c;color:#ddd;border:none;padding:5px 12px;border-radius:2px;cursor:pointer">Remind Me Later</button>
+          <div style="font-weight:600;margin-bottom:5px">${headline}</div>
+          <div style="color:#9a9a9a;line-height:1.5">${body}</div>
+          <div style="display:flex;gap:8px;margin-top:14px;flex-wrap:wrap">
+            <button id="jdk-locate" style="background:#0e639c;color:#fff;border:none;padding:6px 12px;border-radius:3px;cursor:pointer"><i class="codicon codicon-folder-opened" style="vertical-align:-2px"></i> Locate my JDK</button>
+            <button id="jdk-download" style="background:#3c3c3c;color:#ddd;border:none;padding:6px 12px;border-radius:3px;cursor:pointer">Download JDK</button>
+            <button id="jdk-recheck" style="background:#3c3c3c;color:#ddd;border:none;padding:6px 12px;border-radius:3px;cursor:pointer">Re-check</button>
           </div>
         </div>
         <i id="jdk-close" class="codicon codicon-close" style="cursor:pointer;color:#888"></i>
@@ -3693,10 +3712,22 @@
       if (snoozeDays) localStorage.setItem('jdk.toast.snoozeUntil', String(Date.now() + snoozeDays * 864e5));
       toast.remove();
     };
-    toast.querySelector('#jdk-install').onclick = () => { api.openExternal('https://adoptium.net/temurin/releases/'); dismiss(1); };
-    toast.querySelector('#jdk-later').onclick = () => dismiss(3);
+    toast.querySelector('#jdk-download').onclick = () => { api.openExternal('https://adoptium.net/temurin/releases/?version=21'); };
     toast.querySelector('#jdk-close').onclick = () => dismiss(3);
-  });
+    toast.querySelector('#jdk-locate').onclick = async () => {
+      const r = await api.javaLocate();
+      if (r.canceled) return;
+      if (r.error) { showNotification(r.error, 'error'); return; }
+      if (r.found) { showNotification('JDK set: ' + r.home + '. Open a new terminal to use javac.', 'info'); dismiss(0); }
+    };
+    toast.querySelector('#jdk-recheck').onclick = async () => {
+      const r = await api.javaRedetect();
+      if (r.found) { showNotification('JDK found: ' + r.home, 'info'); dismiss(0); }
+      else { showNotification('Still no JDK detected. Use "Locate my JDK" to point at it.', 'error'); }
+    };
+  }
+  // Expose for the Settings menu.
+  window.__jdkToast = showJdkToast;
 
   // =========================================================================
   // Settings & Keyboard Shortcuts pages (VS Code-style full overlays)
