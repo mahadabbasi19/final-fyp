@@ -12,6 +12,22 @@ const { spawn } = require('child_process');
 
 app.disableHardwareAcceleration();
 
+// Single-instance lock. Two app instances share port 8000 but have DIFFERENT
+// auth tokens: the second instance's backend replaces the first's, and the
+// first window then gets 401 "Missing or invalid X-CodeNova-Token" on every
+// engine request. Focus the existing window instead of opening a second.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 let mainWindow;
 let pty;
 let backendProcess = null;
@@ -260,14 +276,42 @@ function getBundledBackendBinary() {
 function killPortProcess(port) {
   return new Promise((resolve) => {
     if (process.platform === 'win32') {
-      const find = spawn('cmd', ['/c', `for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port} ^| findstr LISTENING') do taskkill /PID %a /F`], { shell: true });
-      find.on('close', () => resolve());
-      setTimeout(() => resolve(), 3000);
+      // PowerShell is reliable here. The previous cmd/for/findstr one-liner
+      // was spawned with {shell:true}, which wrapped cmd in ANOTHER cmd and
+      // mangled the %a / ^| escaping — the stale process never died. A
+      // leftover backend from a crashed session then kept port 8000 with an
+      // OLD auth token, producing "Missing or invalid X-CodeNova-Token" on
+      // every request while /health (auth-exempt) still looked connected.
+      const ps = spawn('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `Get-NetTCPConnection -LocalPort ${port} -State Listen -ErrorAction SilentlyContinue | ` +
+        `Select-Object -ExpandProperty OwningProcess -Unique | ` +
+        `ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }`,
+      ]);
+      ps.on('close', () => resolve());
+      ps.on('error', () => resolve());
+      setTimeout(() => resolve(), 4000);
     } else {
       const find = spawn('sh', ['-c', `lsof -ti:${port} | xargs kill -9 2>/dev/null`]);
       find.on('close', () => resolve());
+      find.on('error', () => resolve());
       setTimeout(() => resolve(), 3000);
     }
+  });
+}
+
+// Verify the backend that answers on our port actually accepts OUR token.
+// Returns the HTTP status of an authenticated request (0 on network error).
+function backendAuthPing() {
+  const http = require('http');
+  return new Promise((resolve) => {
+    const req = http.request({
+      hostname: '127.0.0.1', port: BACKEND_PORT, path: '/stats', method: 'GET',
+      headers: { 'X-CodeNova-Token': BACKEND_AUTH_TOKEN }, timeout: 5000,
+    }, (res) => { res.resume(); resolve(res.statusCode); });
+    req.on('error', () => resolve(0));
+    req.on('timeout', () => { req.destroy(); resolve(0); });
+    req.end();
   });
 }
 
@@ -779,8 +823,15 @@ async function backendFetch(endpoint, method, body) {
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve(data); }
+        try {
+          const parsed = JSON.parse(data);
+          // Translate the internal auth error into something a user can act
+          // on (it means a stale engine process — a restart re-pairs them).
+          if (res.statusCode === 401 && parsed && typeof parsed.detail === 'string' && parsed.detail.includes('X-CodeNova-Token')) {
+            parsed.detail = 'Engine session mismatch — please close and reopen CodeNova IDE.';
+          }
+          resolve(parsed);
+        } catch { resolve(data); }
       });
     });
     req.on('error', reject);
@@ -1121,7 +1172,24 @@ app.whenReady().then(async () => {
   });
 
   // Start backend in background
-  const backendStarted = await startBackend();
+  let backendStarted = await startBackend();
+
+  // Self-healing: whoever answers on the port must accept OUR token. A 401
+  // here means a stale backend (old token) survived a crash or a second
+  // launch and is squatting on the port — kill it and respawn ours once.
+  if (backendStarted || (await backendAuthPing()) === 401) {
+    const status = await backendAuthPing();
+    if (status === 401) {
+      console.warn('Stale backend detected (token mismatch) — restarting it.');
+      stopBackend();
+      await killPortProcess(BACKEND_PORT);
+      await new Promise((r) => setTimeout(r, 1000));
+      backendStarted = await startBackend();
+      const retry = await backendAuthPing();
+      console.log('Backend auth after restart:', retry === 200 ? 'OK' : `status ${retry}`);
+    }
+  }
+
   if (backendStarted) {
     console.log('FastAPI backend started on port', BACKEND_PORT);
     if (mainWindow && !mainWindow.isDestroyed()) {
