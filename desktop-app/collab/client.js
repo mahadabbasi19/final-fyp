@@ -175,7 +175,12 @@ function bindEditor(editor, filePath) {
     return () => unbindEditor(filePath);
   }
 
-  const fileDocName = `${state.workspaceId}/${encodeURIComponent(filePath)}`;
+  // Key the shared doc by FILENAME, not the absolute path. Two teammates on
+  // different OSes have different paths (/Users/.../X.java vs C:\...\X.java) —
+  // keying by full path meant they bound to separate docs and never synced.
+  // Basename matches across machines so "OrderManager.java" is one shared doc.
+  const baseName = String(filePath).split(/[\\/]/).pop();
+  const fileDocName = `${state.workspaceId}/${encodeURIComponent(baseName)}`;
   const ydoc = new Y.Doc();
   const provider = new WebsocketProvider(
     wsBase(),
