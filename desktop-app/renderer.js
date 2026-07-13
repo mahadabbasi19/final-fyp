@@ -3617,36 +3617,53 @@
         : `Uses the relay server (<b>${escapeHtml(localStorage.getItem('collab.relayUrl') || COLLAB_RELAY_DEFAULT)}</b>). Teammates can join from anywhere in the world. Configure the relay URL from the 📡 menu.`;
     };
 
+    // Reject instead of hanging forever if a network/host call stalls.
+    const withTimeout = (promise, ms, label) => Promise.race([
+      promise,
+      new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
+    ]);
+
     overlay.querySelector('#collab-generate').onclick = async () => {
       const btn = overlay.querySelector('#collab-generate');
+      const origLabel = btn.innerHTML;
       btn.disabled = true;
+      let started = false;
       try {
         let shareToken;
         if (modeSel.value === 'lan') {
-          // In-app host (idempotent — reuses a running session).
-          const info = await api.collabHostStart();
-          if (info.error) throw new Error(info.error);
-          await window.collab.joinDirect(info.localUrl, info.workspaceId, info.key);
+          btn.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i> Starting…';
+          const info = await withTimeout(api.collabHostStart(), 12000,
+            'Could not start the local host. Make sure the app has network permission.');
+          if (!info || info.error) throw new Error((info && info.error) || 'Host failed to start.');
+          await withTimeout(window.collab.joinDirect(info.localUrl, info.workspaceId, info.key), 12000,
+            'Host started but the editor could not connect to it.');
           shareToken = btoa(JSON.stringify({ u: info.url, w: info.workspaceId, k: info.key }));
           showNotification('Live session started — you are hosting.', 'info');
         } else {
-          // Worldwide: JWT session on the configured relay server.
+          btn.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i> Waking relay… (up to 60s)';
+          const relay = localStorage.getItem('collab.relayUrl') || COLLAB_RELAY_DEFAULT;
           try {
-            const { token, workspaceId } = await window.collab.shareWorkspace({ role: 'editor' });
+            const { token, workspaceId } = await withTimeout(
+              window.collab.shareWorkspace({ role: 'editor' }), 60000,
+              'timeout');
             shareToken = token;
             showNotification(`Worldwide session ${workspaceId.slice(0, 8)}… started.`, 'info');
           } catch (relayErr) {
-            throw new Error(
-              'Relay server unreachable at ' +
-              (localStorage.getItem('collab.relayUrl') || COLLAB_RELAY_DEFAULT) +
-              '. Deploy collab-server (see repo README) and set its URL via the 📡 menu → "Collab Server". (' + relayErr.message + ')');
+            const msg = relayErr.message === 'timeout'
+              ? `Relay did not respond within 60s at ${relay}. Free-tier relays sleep when idle — click Start Sharing again to retry (it should be awake now).`
+              : `Relay unreachable at ${relay}. Set a working relay URL via the 📡 menu → "Collab Server". (${relayErr.message})`;
+            throw new Error(msg);
           }
         }
         overlay.querySelector('#collab-token-text').value = shareToken;
         overlay.querySelector('#collab-token-result').style.display = 'block';
+        started = true;
       } catch (e) {
         showNotification('Share failed: ' + e.message, 'error');
-        btn.disabled = false;
+      } finally {
+        // ALWAYS restore the button unless a session actually started.
+        if (!started) { btn.disabled = false; btn.innerHTML = origLabel; }
+        else { btn.innerHTML = '<i class="codicon codicon-broadcast"></i> Sharing ✓'; }
       }
     };
     overlay.querySelector('#collab-copy-token').onclick = () => {
@@ -3683,17 +3700,18 @@
     const close = () => overlay.remove();
     overlay.querySelector('#collab-cancel').onclick = close;
     overlay.querySelector('#collab-join-go').onclick = async () => {
+      const jbtn = overlay.querySelector('#collab-join-go');
+      const jLabel = jbtn.innerHTML;
+      const withTimeout = (p, ms, m) => Promise.race([p, new Promise((_, r) => setTimeout(() => r(new Error(m)), ms))]);
+      const token = overlay.querySelector('#collab-join-token').value.trim();
+      if (!token) { showNotification('Paste a join token first.', 'error'); return; }
+      jbtn.disabled = true; jbtn.innerHTML = '<i class="codicon codicon-loading codicon-modifier-spin"></i> Joining…';
+      let joined = false;
       try {
         const name = overlay.querySelector('#collab-display-name').value.trim() || getUsername();
         localStorage.setItem('collab.username', name);
-        window.collab.init({
-          relayUrl: COLLAB_RELAY_DEFAULT,
-          monacoInstance: window.monaco,
-          username: name,
-        });
+        window.collab.init({ relayUrl: COLLAB_RELAY_DEFAULT, monacoInstance: window.monaco, username: name });
         window.collab.onPresence(renderPresenceBadge);
-        const token = overlay.querySelector('#collab-join-token').value.trim();
-        if (!token) return;
 
         // New self-contained tokens are base64 JSON {u: hostUrl, w, k}.
         // Fall back to legacy JWT tokens (external relay) if parsing fails.
@@ -3705,14 +3723,19 @@
 
         let workspaceId, role;
         if (direct) {
-          ({ workspaceId, role } = await window.collab.joinDirect(direct.u, direct.w, direct.k));
+          ({ workspaceId, role } = await withTimeout(window.collab.joinDirect(direct.u, direct.w, direct.k), 15000,
+            'Could not reach the host. Make sure the sharer still has CodeNova open and you are on the same network.'));
         } else {
-          ({ workspaceId, role } = await window.collab.joinWithToken(token));
+          ({ workspaceId, role } = await withTimeout(window.collab.joinWithToken(token), 60000,
+            'Relay did not respond within 60s (free-tier relays sleep when idle — try Join again).'));
         }
         showNotification(`Joined workspace ${workspaceId.slice(0, 8)}… as ${role}.`, 'info');
+        joined = true;
         close();
       } catch (e) {
         showNotification('Join failed: ' + e.message, 'error');
+      } finally {
+        if (!joined) { jbtn.disabled = false; jbtn.innerHTML = jLabel; }
       }
     };
   }
